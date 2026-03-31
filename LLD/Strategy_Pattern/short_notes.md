@@ -29,3 +29,31 @@ The **Strategy Pattern** is like having a **Swiss Army Knife**. Instead of a fix
 2. Use the Strategy when you have a lot of similar classes that only differ in the way they execute some behavior.
 3. Use the pattern to isolate the business logic of a class from the implementation details of algorithms that may not be as important in the context of that logic.
 4. Use the pattern when your class has a massive conditional statement that switches between different variants of the same algorithm.
+
+
+### Class Diagram
+        +-------------------+
+        |     Context       |
+        +-------------------+
+        | - strategy        |
+        +-------------------+
+        | + setStrategy()   |
+        | + execute()       |
+        +--------+----------+
+                 |
+                 v
+        +-------------------+
+        |   Strategy (I)    |  <-- Interface
+        +-------------------+
+        | + execute()       |
+        +--------+----------+
+                 |
+     ----------------------------
+     |            |             |
+     v            v             v
+
++------------+ +------------+ +------------+
+| StrategyA  | | StrategyB  | | StrategyC  |
++------------+ +------------+ +------------+
+| execute()  | | execute()  | | execute()  |
++------------+ +------------+ +------------+
