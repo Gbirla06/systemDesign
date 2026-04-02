@@ -43,9 +43,9 @@ In computing, everything is built on **powers of 2**. You MUST know these by hea
 ```
 Think of it as a staircase — each step is 1024× bigger:
 
-    1 PB  ← Entire Netflix library
-   /
-  1 TB   ← Your hard drive
+ 1 PB   ← Entire Netflix library
+ /
+1 TB    ← Your hard drive
  /
 1 GB    ← A movie file
  /
@@ -153,7 +153,7 @@ Imagine each operation as a **trip**:
 │  Disk Read   = Driving to a different state             (50 min)   │
 │  Cross-DC    = Flying to another continent              (4 hours)  │
 │                                                                    │
-│  If L1 cache = 1 second, then Disk seek = ~7.6 YEARS!             │
+│  If L1 cache = 1 second, then Disk seek = ~7.6 YEARS!              │
 │                                                                    │
 └────────────────────────────────────────────────────────────────────┘
 ```
@@ -499,36 +499,36 @@ Actual storage ≈ 548 PB × 3 versions ≈ ~1.6 Exabytes!
 │  QPS (Queries Per Second):                                          │
 │  ──────────────────────────                                         │
 │  QPS = DAU × (queries per user per day) / 86,400                    │
-│  Peak QPS = QPS × 2  (or × 3 for spiky workloads)                  │
+│  Peak QPS = QPS × 2  (or × 3 for spiky workloads)                   │
 │                                                                     │
-│  ─────────────────────────────────────────────────────────────────   │
+│  ─────────────────────────────────────────────────────────────────  │
 │                                                                     │
 │  Storage:                                                           │
 │  ──────────                                                         │
-│  Daily Storage = DAU × (% active) × (data per action) × (actions)  │
-│  Total Storage = Daily Storage × 365 × years                       │
+│  Daily Storage = DAU × (% active) × (data per action) × (actions)   │
+│  Total Storage = Daily Storage × 365 × years                        │
 │                                                                     │
-│  ─────────────────────────────────────────────────────────────────   │
+│  ─────────────────────────────────────────────────────────────────  │
 │                                                                     │
 │  Bandwidth:                                                         │
 │  ──────────                                                         │
 │  Bandwidth = QPS × (avg response size)                              │
 │  Express in: Mbps or Gbps (bits per second)                         │
 │                                                                     │
-│  ─────────────────────────────────────────────────────────────────   │
+│  ─────────────────────────────────────────────────────────────────  │
 │                                                                     │
 │  Cache Memory:                                                      │
 │  ─────────────                                                      │
 │  Cache = QPS × (avg data size) × (cache duration in seconds)        │
-│  Rule of thumb: Cache the top 20% (Pareto Principle: 80/20 rule)   │
-│  → Cache memory = 0.2 × Daily data × avg data size                 │
+│  Rule of thumb: Cache the top 20% (Pareto Principle: 80/20 rule)    │
+│  → Cache memory = 0.2 × Daily data × avg data size                  │
 │                                                                     │
-│  ─────────────────────────────────────────────────────────────────   │
+│  ─────────────────────────────────────────────────────────────────  │
 │                                                                     │
 │  Servers Needed:                                                    │
 │  ───────────────                                                    │
 │  Servers = Peak QPS / (QPS capacity per server)                     │
-│  Typical server handles: 500-1000 QPS (web), 50-100 QPS (DB)       │
+│  Typical server handles: 500-1000 QPS (web), 50-100 QPS (DB)        │
 │                                                                     │
 └─────────────────────────────────────────────────────────────────────┘
 ```
@@ -645,26 +645,26 @@ Actual storage ≈ 548 PB × 3 versions ≈ ~1.6 Exabytes!
 
 ```
 ╔══════════════════════════════════════════════════════════════╗
-║              ESTIMATION CHEAT SHEET                         ║
+║              ESTIMATION CHEAT SHEET                          ║
 ╠══════════════════════════════════════════════════════════════╣
 ║                                                              ║
-║  SECONDS IN A DAY     = 86,400 ≈ 10⁵                       ║
-║  SECONDS IN A YEAR    = ~31.5M ≈ 3 × 10⁷                   ║
+║  SECONDS IN A DAY     = 86,400 ≈ 10⁵                         ║
+║  SECONDS IN A YEAR    = ~31.5M ≈ 3 × 10⁷                     ║
 ║                                                              ║
-║  1 KB = 10³ bytes     1 MB = 10⁶ bytes                      ║
-║  1 GB = 10⁹ bytes     1 TB = 10¹² bytes                     ║
+║  1 KB = 10³ bytes     1 MB = 10⁶ bytes                       ║
+║  1 GB = 10⁹ bytes     1 TB = 10¹² bytes                      ║
 ║                                                              ║
-║  QPS      = DAU × actions ÷ 86,400                          ║
-║  Peak QPS = QPS × 2~5                                       ║
-║  Storage  = Daily data × 365 × years                        ║
-║  Cache    = 20% × daily data  (80/20 rule)                  ║
+║  QPS      = DAU × actions ÷ 86,400                           ║
+║  Peak QPS = QPS × 2~5                                        ║
+║  Storage  = Daily data × 365 × years                         ║
+║  Cache    = 20% × daily data  (80/20 rule)                   ║
 ║  Bandwidth = QPS × response size                             ║
 ║                                                              ║
-║  SPEED:   L1 < L2 < RAM < SSD < Disk < Network < Cross-DC  ║
+║  SPEED:   L1 > L2 > RAM > SSD > Disk > Network > Cross-DC    ║
 ║                                                              ║
-║  99.9%    = 8.77 hours downtime/year                        ║
-║  99.99%   = 52.6 minutes downtime/year                      ║
-║  99.999%  = 5.26 minutes downtime/year                      ║
+║  99.9%    = 8.77 hours downtime/year                         ║
+║  99.99%   = 52.6 minutes downtime/year                       ║
+║  99.999%  = 5.26 minutes downtime/year                       ║
 ║                                                              ║
 ║  RAM is ~100x faster than Disk                               ║
 ║  Always compress before sending over network                 ║
