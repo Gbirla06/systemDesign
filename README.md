@@ -65,14 +65,14 @@ Covers large-scale distributed system design based on **Alex Xu's System Design 
 | # | Chapter | Status |
 |---|---|---|
 | 1 | Scale From Zero To Millions Of Users | ✅ Done |
-| 2 | Back-of-the-Envelope Estimation | 🔜 Coming Soon |
-| 3 | A Framework for System Design Interviews | 🔜 Coming Soon |
-| 4 | Design a Rate Limiter | 🔜 Coming Soon |
-| 5 | Design Consistent Hashing | 🔜 Coming Soon |
-| 6 | Design a Key-Value Store | 🔜 Coming Soon |
-| 7 | Design a Unique ID Generator | 🔜 Coming Soon |
-| 8 | Design a URL Shortener | 🔜 Coming Soon |
-| 9 | Design a Web Crawler | 🔜 Coming Soon |
+| 2 | Back-of-the-Envelope Estimation | ✅ Done |
+| 3 | A Framework for System Design Interviews | ✅ Done |
+| 4 | Design a Rate Limiter | ✅ Done |
+| 5 | Design Consistent Hashing | ✅ Done |
+| 6 | Design a Key-Value Store | ✅ Done |
+| 7 | Design a Unique ID Generator | ✅ Done |
+| 8 | Design a URL Shortener | ✅ Done |
+| 9 | Design a Web Crawler | ✅ Done |
 | 10 | Design a Notification System | 🔜 Coming Soon |
 | 11 | Design a News Feed System | 🔜 Coming Soon |
 | 12 | Design a Chat System | 🔜 Coming Soon |
