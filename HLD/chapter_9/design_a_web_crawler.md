@@ -229,4 +229,4 @@ To design a flawless URL Frontier, remember the 3 P's:
 
 > **📖 Previous Chapter:** [← Chapter 8: Design a URL Shortener](/HLD/chapter_8/design_a_url_shortener.md)
 >
-> **📖 Next Chapter:** [Chapter 10: Design a Notification System →](/HLD/chapter_10/)
+> **📖 Next Chapter:** [Chapter 10: Design a Notification System →](/HLD/chapter_10/design_a_notification_system.md)
