@@ -704,4 +704,4 @@ Key: Most time goes to Steps 2 & 3!
 
 > **📖 Previous Chapter:** [← Chapter 2: Back-of-the-Envelope Estimation](/HLD/chapter_2/back_of_the_envelope_estimation.md)
 >
-> **📖 Next Chapter:** [Chapter 3: Design a Rate Limiter →](/HLD/chapter_4/)
+> **📖 Next Chapter:** [Chapter 4: Design a Rate Limiter →](/HLD/chapter_4/design_a_rate_limiter.md)

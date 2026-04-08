@@ -1228,4 +1228,4 @@ graph TB
 
 > **📖 Previous Chapter:** [← Chapter 3: A Framework for System Design Interviews](/HLD/chapter_3/a_framework_for_system_design_interviews.md)
 >
-> **📖 Next Chapter:** [Chapter 5: Design Consistent Hashing →](/HLD/chapter_5/)
+> **📖 Next Chapter:** [Chapter 5: Design Consistent Hashing →](/HLD/chapter_5/design_consistent_hashing.md)

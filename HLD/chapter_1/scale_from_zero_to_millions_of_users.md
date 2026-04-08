@@ -954,4 +954,4 @@ graph TB
 
 ---
 
-> **📖 Next Chapter: Back-of-the-Envelope Estimation →**
+> **📖 Next Chapter:** [Chapter 2: Back-of-the-Envelope Estimation →](/HLD/chapter_2/back_of_the_envelope_estimation.md)

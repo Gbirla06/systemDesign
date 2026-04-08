@@ -1076,6 +1076,6 @@ graph TB
 
 ---
 
-> **📖 Previous Chapter:** [← Chapter 4: Design a Rate Limiter](/HLD/chapter_4/design_a_rate_limiter.md)
+> **📖 Previous Chapter:** [← Chapter 5: Design Consistent Hashing](/HLD/chapter_5/design_consistent_hashing.md)
 >
-> **📖 Next Chapter:** [Chapter 7: Design a Unique ID Generator →](/HLD/chapter_6/)
+> **📖 Next Chapter:** [Chapter 7: Design a Unique ID Generator in Distributed Systems →](/HLD/chapter_7/design_a_unique_id_generator_in_distributed_systems.md)

@@ -677,4 +677,4 @@ Actual storage ≈ 548 PB × 3 versions ≈ ~1.6 Exabytes!
 
 > **📖 Previous Chapter:** [← Chapter 1: Scale From Zero To Millions](/HLD/chapter_1/scale_from_zero_to_millions_of_users.md)
 >
-> **📖 Next Chapter:** [Chapter 3: A Framework For System Design Interviews →](/HLD/chapter_3/)
+> **📖 Next Chapter:** [Chapter 3: A Framework for System Design Interviews →](/HLD/chapter_3/a_framework_for_system_design_interviews.md)
