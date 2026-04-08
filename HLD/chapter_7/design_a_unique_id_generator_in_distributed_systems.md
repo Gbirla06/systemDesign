@@ -903,4 +903,4 @@ Snowflake:     ✅ EVERYTHING ❌ Clock sync needed
 
 > **📖 Previous Chapter:** [← Chapter 6: Design a Key-Value Store](/HLD/chapter_6/design_a_key_value_store.md)
 >
-> **📖 Next Chapter:** [Chapter 8: Design a URL Shortener →](/HLD/chapter_8/)
+> **📖 Next Chapter:** [Chapter 8: Design a URL Shortener →](/HLD/chapter_8/design_a_url_shortener.md)
