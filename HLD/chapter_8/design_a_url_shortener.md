@@ -275,4 +275,4 @@ Use **Lazy Cleanup**:
 
 > **📖 Previous Chapter:** [← Chapter 7: Design a Unique ID Generator in Distributed Systems](/HLD/chapter_7/design_a_unique_id_generator_in_distributed_systems.md)
 >
-> **📖 Next Chapter:** [Chapter 9: Design a Web Crawler →](/HLD/chapter_9/)
+> **📖 Next Chapter:** [Chapter 9: Design a Web Crawler →](/HLD/chapter_9/design_a_web_crawler.md)
