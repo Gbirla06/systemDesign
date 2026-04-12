@@ -64,21 +64,21 @@ Covers large-scale distributed system design based on **Alex Xu's System Design 
 
 | # | Chapter | Status |
 |---|---|---|
-| 1 | Scale From Zero To Millions Of Users | ✅ Done |
-| 2 | Back-of-the-Envelope Estimation | ✅ Done |
-| 3 | A Framework for System Design Interviews | ✅ Done |
-| 4 | Design a Rate Limiter | ✅ Done |
-| 5 | Design Consistent Hashing | ✅ Done |
-| 6 | Design a Key-Value Store | ✅ Done |
-| 7 | Design a Unique ID Generator | ✅ Done |
-| 8 | Design a URL Shortener | ✅ Done |
-| 9 | Design a Web Crawler | ✅ Done |
-| 10 | Design a Notification System | 🔜 Coming Soon |
-| 11 | Design a News Feed System | 🔜 Coming Soon |
-| 12 | Design a Chat System | 🔜 Coming Soon |
-| 13 | Design a Search Autocomplete System | 🔜 Coming Soon |
-| 14 | Design YouTube | 🔜 Coming Soon |
-| 15 | Design Google Drive | 🔜 Coming Soon |
+| 1 | [Scale From Zero To Millions Of Users](/HLD/chapter_1/scale_from_zero_to_millions_of_users.md) | ✅ Done |
+| 2 | [Back-of-the-Envelope Estimation](/HLD/chapter_2/back_of_the_envelope_estimation.md) | ✅ Done |
+| 3 | [A Framework for System Design Interviews](/HLD/chapter_3/a_framework_for_system_design_interviews.md) | ✅ Done |
+| 4 | [Design a Rate Limiter](/HLD/chapter_4/design_a_rate_limiter.md) | ✅ Done |
+| 5 | [Design Consistent Hashing](/HLD/chapter_5/design_consistent_hashing.md) | ✅ Done |
+| 6 | [Design a Key-Value Store](/HLD/chapter_6/design_a_key_value_store.md) | ✅ Done |
+| 7 | [Design a Unique ID Generator](/HLD/chapter_7/design_a_unique_id_generator_in_distributed_systems.md) | ✅ Done |
+| 8 | [Design a URL Shortener](/HLD/chapter_8/design_a_url_shortener.md) | ✅ Done |
+| 9 | [Design a Web Crawler](/HLD/chapter_9/design_a_web_crawler.md) | ✅ Done |
+| 10 | [Design a Notification System](/HLD/chapter_10/design_a_notification_system.md) | ✅ Done |
+| 11 | [Design a News Feed System](/HLD/chapter_11/design_a_news_feed_system.md) | ✅ Done |
+| 12 | [Design a Chat System](/HLD/chapter_12/design_a_chat_system.md) | ✅ Done |
+| 13 | [Design a Search Autocomplete System](/HLD/chapter_13/design_a_search_autocomplete_system.md) | ✅ Done |
+| 14 | [Design YouTube](/HLD/chapter_14/design_youtube.md) | ✅ Done |
+| 15 | [Design Google Drive](/HLD/chapter_15/design_google_drive.md) | ✅ Done |
 
 ---
 
