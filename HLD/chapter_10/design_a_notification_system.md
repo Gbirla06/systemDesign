@@ -134,6 +134,112 @@ graph LR
 
 ---
 
+## 🗄️ Step 2B: Data Model — Storing Contact Info
+
+Before we can send any notification, we need to know *where* to send it. The device token lifecycle is:
+
+```
+1. User installs app on iPhone → iOS SDK auto-generates a Device Token
+2. App calls: NotificationServer.registerDevice(user_id, device_token, platform="iOS")
+3. Stored in DB → linked to user_id
+```
+
+### Database Schema
+
+```sql
+-- Users table (basic user identity)
+CREATE TABLE users (
+    user_id     BIGINT PRIMARY KEY,
+    email       VARCHAR(255),
+    phone       VARCHAR(20),
+    locale      VARCHAR(10),          -- "en-US", "fr-FR" for template localization
+    created_at  DATETIME
+);
+
+-- Devices table (one user can have many devices)
+CREATE TABLE user_devices (
+    device_id       BIGINT PRIMARY KEY AUTO_INCREMENT,
+    user_id         BIGINT NOT NULL,
+    device_token    VARCHAR(500) NOT NULL,    -- APNs/FCM device token (rotates periodically!)
+    platform        ENUM('iOS', 'Android', 'Web'),
+    last_active_at  DATETIME,
+    INDEX idx_user_devices (user_id)
+);
+
+-- Notification preferences per user per channel
+CREATE TABLE notification_settings (
+    user_id     BIGINT NOT NULL,
+    channel     ENUM('iOS_PUSH', 'ANDROID_PUSH', 'SMS', 'EMAIL'),
+    category    ENUM('MARKETING', 'TRANSACTIONAL', 'SOCIAL'),
+    is_enabled  BOOLEAN DEFAULT TRUE,
+    PRIMARY KEY (user_id, channel, category)
+);
+
+-- Notification log (the durability guarantee)
+CREATE TABLE notification_log (
+    log_id          BIGINT PRIMARY KEY AUTO_INCREMENT,
+    notification_id VARCHAR(64) UNIQUE,      -- Idempotency key
+    user_id         BIGINT,
+    channel         ENUM('iOS_PUSH', 'ANDROID_PUSH', 'SMS', 'EMAIL'),
+    template_id     VARCHAR(100),
+    payload         JSON,
+    status          ENUM('PENDING', 'SENT', 'DELIVERED', 'FAILED'),
+    attempt_count   INT DEFAULT 0,
+    created_at      DATETIME,
+    sent_at         DATETIME,
+    INDEX idx_status_created (status, created_at)   -- for sweeper job
+);
+```
+
+> **Why does `device_token` rotate?** APNs rotates device tokens periodically for security. When a worker receives `410 Gone` from APNs (token invalid), it must delete the old token from `user_devices` and wait for the app to re-register a fresh one. Failing to do this causes: token pile-up in DB, silent notification failures, and wasted bandwidth.
+
+---
+
+## 🔄 Step 2C: The Full Notification Flow — Sequence Diagram
+
+```mermaid
+sequenceDiagram
+    participant Billing as 💳 Billing Service
+    participant NS as ⚙️ Notification Server
+    participant SettingsDB as 💾 Settings DB
+    participant MQ as 📦 Kafka Queue
+    participant Worker as 👷 iOS Worker
+    participant LogDB as 📋 Log DB
+    participant APNs as 🍎 APNs
+
+    Billing->>NS: POST /notify\n{user_id: 123, event: "PAYMENT_SUCCESS", amount: "$49.99"}
+    NS->>SettingsDB: SELECT device_token FROM user_devices WHERE user_id=123 AND platform='iOS'
+    SettingsDB-->>NS: device_token = "abc123xyz..."
+    NS->>SettingsDB: SELECT is_enabled FROM notification_settings WHERE user_id=123 AND channel='iOS_PUSH' AND category='TRANSACTIONAL'
+    SettingsDB-->>NS: is_enabled = TRUE
+
+    NS->>NS: Apply Template → "Your payment of $49.99 was received ✓"
+    NS->>NS: Apply Rate Limiter → user 123 has sent 2 pushes this hour (limit=10) ✓
+    NS->>MQ: PUBLISH to "ios-notifications" topic:\n{notification_id, device_token, payload}
+    NS-->>Billing: 202 Accepted (async! done immediately)
+
+    MQ->>Worker: DELIVER message (visibility timeout: 15 min)
+    Worker->>LogDB: INSERT notification_log (status=PENDING, attempt=1)
+    Worker->>APNs: POST /3/device/{device_token}\n{aps: {alert: "Your payment of $49.99 was received ✓"}}
+
+    alt APNs returns 200 OK
+        APNs-->>Worker: 200 OK
+        Worker->>LogDB: UPDATE notification_log SET status=SENT, sent_at=NOW()
+        Worker->>MQ: DELETE message from queue (acknowledge)
+    else APNs returns 500 (temporary failure)
+        APNs-->>Worker: 500 Internal Server Error
+        Worker->>LogDB: UPDATE notification_log SET status=PENDING, attempt_count=2
+        Worker->>MQ: NACK → message returns to queue with 2-min delay (exponential backoff)
+    else APNs returns 410 Gone (invalid token)
+        APNs-->>Worker: 410 Gone
+        Worker->>SettingsDB: DELETE FROM user_devices WHERE device_token='abc123xyz...'
+        Worker->>LogDB: UPDATE notification_log SET status=FAILED
+        Note over Worker: Token is stale — delete it, don't retry
+    end
+```
+
+---
+
 ## 🔬 Step 3: The Optimized Architecture — Decoupling with Message Queues
 
 The root cause of all the above problems is **tight coupling** between the Notification Server and the providers. When we use **Message Queues** as a buffer, the Notification Server never talks to providers directly. It just drops messages and "forgets" about them.

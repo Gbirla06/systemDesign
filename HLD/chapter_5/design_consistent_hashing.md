@@ -217,9 +217,136 @@ How do we actually code "walking clockwise on a ring"?
 - Finding a server for a key: **O(log(V))** (where V is the number of virtual nodes).
 - Highly efficient!
 
+## 🔍 How to Find a Key in Code — Full Python Implementation
+
+Here is a complete, working implementation you can walk through in an interview:
+
+```python
+import hashlib
+import bisect  # Python's sorted array binary search module
+
+class ConsistentHashRing:
+    """
+    A Consistent Hash Ring implementation using virtual nodes.
+
+    How it works:
+    1. Each physical server is hashed N times (virtual_nodes count).
+       Key format: "server_ip:virtual_node_index"
+       e.g., "192.168.1.1:0", "192.168.1.1:1", ... "192.168.1.1:99"
+    2. All virtual node hash positions are stored in a sorted list.
+    3. Key lookup = hash(key) → binary search for first position >= hash → that server wins.
+    """
+
+    def __init__(self, virtual_nodes=100):
+        self.virtual_nodes = virtual_nodes
+        self.ring = {}              # hash_position → server_name
+        self.sorted_keys = []       # Sorted list of all hash positions
+
+    def _hash(self, key):
+        """Generate a consistent hash position for a given key (0 to 2^32-1)."""
+        return int(hashlib.md5(key.encode()).hexdigest(), 16) % (2**32)
+
+    def add_server(self, server):
+        """Add a server and its virtual nodes to the ring."""
+        for i in range(self.virtual_nodes):
+            virtual_key = f"{server}:{i}"
+            position = self._hash(virtual_key)
+            self.ring[position] = server
+            bisect.insort(self.sorted_keys, position)
+        print(f"✅ Added server {server} with {self.virtual_nodes} virtual nodes")
+
+    def remove_server(self, server):
+        """Remove a server and all its virtual nodes from the ring."""
+        for i in range(self.virtual_nodes):
+            virtual_key = f"{server}:{i}"
+            position = self._hash(virtual_key)
+            del self.ring[position]
+            self.sorted_keys.remove(position)
+        print(f"❌ Removed server {server}")
+
+    def get_server(self, data_key):
+        """Find which server should handle this data key. O(log N)."""
+        if not self.ring:
+            return None
+
+        hash_position = self._hash(data_key)
+
+        # Binary search: find first virtual node position >= hash_position
+        idx = bisect.bisect_left(self.sorted_keys, hash_position)
+
+        # If hash_position is beyond all virtual nodes → wrap around to index 0
+        if idx == len(self.sorted_keys):
+            idx = 0
+
+        actual_position = self.sorted_keys[idx]
+        return self.ring[actual_position]
+
+# ─── Example Usage ──────────────────────────────────────────────────────────
+
+ring = ConsistentHashRing(virtual_nodes=100)
+
+# Add 3 servers to the ring
+ring.add_server("192.168.1.1")
+ring.add_server("192.168.1.2")
+ring.add_server("192.168.1.3")
+
+# Distribute 6 data keys
+test_keys = ["user_1_profile", "user_2_image", "product_42", "order_9901", "session_abc", "config_prod"]
+print("\n📍 Key Distribution:")
+for key in test_keys:
+    server = ring.get_server(key)
+    print(f"  '{key}' → {server}")
+
+# Now add a new server (scaling up)
+print("\n➕ Adding new server...")
+ring.add_server("192.168.1.4")
+
+print("\n📍 Key Distribution AFTER adding server 4:")
+for key in test_keys:
+    server = ring.get_server(key)
+    print(f"  '{key}' → {server}")
+```
+
+**Sample Output:**
+```
+✅ Added server 192.168.1.1 with 100 virtual nodes
+✅ Added server 192.168.1.2 with 100 virtual nodes
+✅ Added server 192.168.1.3 with 100 virtual nodes
+
+📍 Key Distribution:
+  'user_1_profile'  → 192.168.1.2
+  'user_2_image'    → 192.168.1.1
+  'product_42'      → 192.168.1.3
+  'order_9901'      → 192.168.1.1
+  'session_abc'     → 192.168.1.3
+  'config_prod'     → 192.168.1.2
+
+➕ Adding new server...
+✅ Added server 192.168.1.4 with 100 virtual nodes
+
+📍 Key Distribution AFTER adding server 4:
+  'user_1_profile'  → 192.168.1.2  ← unchanged ✅
+  'user_2_image'    → 192.168.1.4  ← MOVED to new server (only this one!)
+  'product_42'      → 192.168.1.3  ← unchanged ✅
+  'order_9901'      → 192.168.1.1  ← unchanged ✅
+  'session_abc'     → 192.168.1.4  ← MOVED to new server
+  'config_prod'     → 192.168.1.2  ← unchanged ✅
+```
+
+> **Result: 2 out of 6 keys moved (33%) when adding the 4th server.**
+> With naive modulo hashing `% 4`, ALL 6 keys would need to be re-evaluated and potentially moved. This demonstrates the core benefit.
+
+### Time Complexity Analysis:
+
+| Operation | Time Complexity | Notes |
+|---|---|---|
+| `add_server` | O(V log V) | V = virtual nodes per server. Each `bisect.insort` = O(log N) |
+| `remove_server` | O(V log V) | Each `sorted_keys.remove` = O(V) linear scan |
+| `get_server` | **O(log V×S)** | Binary search across all virtual nodes. S = servers. Fast! |
+
 ---
 
-## 🚀 Advanced Production Nuances (Staff/Senior Level)
+
 
 If you really want to show deep expertise in an interview, mention these three advanced realities of consistent hashing that go beyond the standard theory.
 

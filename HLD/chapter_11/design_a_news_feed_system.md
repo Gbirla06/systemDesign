@@ -264,6 +264,106 @@ Different types of data have different access patterns, so we use different stor
 | **Feed Caches** | **Redis** | Lightning fast sorted sets. Ephemeral data (can be rebuilt). |
 | **Post Caches** | **Redis** | Key-value lookup. `post_id -> post_data`. |
 
+### Database Schema Design
+
+```sql
+-- Users table
+CREATE TABLE users (
+    user_id     BIGINT PRIMARY KEY,        -- Snowflake ID (Chapter 7!)
+    username    VARCHAR(100) UNIQUE NOT NULL,
+    name        VARCHAR(200),
+    avatar_url  VARCHAR(500),
+    created_at  DATETIME
+);
+
+-- Posts table (write once, never updated)
+CREATE TABLE posts (
+    post_id     BIGINT PRIMARY KEY,        -- Snowflake ID (time-sortable = time order!)
+    user_id     BIGINT NOT NULL,
+    content     TEXT,
+    media_url   VARCHAR(500),              -- S3/CDN URL for image/video
+    created_at  DATETIME NOT NULL,
+    INDEX idx_user_posts (user_id, post_id DESC)  -- "get all posts by user X, newest first"
+);
+
+-- Social graph: who follows whom
+CREATE TABLE follows (
+    follower_id BIGINT NOT NULL,
+    followee_id BIGINT NOT NULL,
+    created_at  DATETIME,
+    PRIMARY KEY (follower_id, followee_id),
+    INDEX idx_followee (followee_id)       -- "who follows this person" (for fanout)
+);
+```
+
+> **Why use Snowflake ID (Chapter 7) as `post_id`?**
+> Snowflake IDs are time-ordered. `SELECT * FROM posts WHERE user_id = X ORDER BY post_id DESC` gives posts in chronological order WITHOUT needing to store or sort by `created_at`. The ID itself encodes time!
+
+---
+
+### The Post Publishing — Full Sequence Diagram
+
+```mermaid
+sequenceDiagram
+    participant Alice as 📱 Alice's App
+    participant LB as ⚖️ Load Balancer
+    participant API as ⚙️ Web Server
+    participant PostSvc as 📝 Post Service
+    participant FanoutSvc as 📡 Fanout Service
+    participant MQ as 📦 Kafka
+    participant FanoutWorker as 👷 Fanout Worker
+    participant Redis as ⚡ Redis
+
+    Alice->>LB: POST /feed/publish {content: "Hello World!", media: <img>}
+    LB->>API: Route request
+    API->>API: Authenticate JWT token
+    API->>PostSvc: Create post
+    PostSvc->>PostSvc: Generate Snowflake post_id
+    PostSvc->>DB: INSERT INTO posts (post_id, user_id, content, created_at)
+    PostSvc->>Redis: SET post:{post_id} = {content, media_url, author_id, timestamp}
+    PostSvc-->>API: post_id = 1847293
+
+    API->>FanoutSvc: Fanout event {post_id: 1847293, author_id: alice, follower_count: 2000}
+    FanoutSvc->>Kafka: Publish to "fanout-jobs" topic
+    API-->>Alice: 200 OK {"post_id": 1847293} (Instant! Fanout is async)
+
+    Note over Kafka, FanoutWorker: Async processing — Alice sees success immediately
+
+    Kafka->>FanoutWorker: Consume fanout job
+    FanoutWorker->>DB: SELECT follower_id FROM follows WHERE followee_id = alice LIMIT 5000
+    loop For each follower (batch of 100)
+        FanoutWorker->>Redis: ZADD feed:bob 1847293 {score: timestamp}
+        FanoutWorker->>Redis: ZADD feed:carol 1847293 {score: timestamp}
+        FanoutWorker->>Redis: ZADD feed:dave 1847293 {score: timestamp}
+        FanoutWorker->>Redis: ZREMRANGEBYRANK feed:bob 0 -501 (trim to 500 most recent)
+    end
+```
+
+**Key details in the fanout worker:**
+```python
+def fanout_worker(fanout_job):
+    post_id     = fanout_job["post_id"]
+    author_id   = fanout_job["author_id"]
+    timestamp   = fanout_job["timestamp"]
+    
+    # Get all follower IDs
+    followers = db.query(
+        "SELECT follower_id FROM follows WHERE followee_id = %s",
+        author_id
+    )
+    
+    # Batch Redis pipeline for performance (not one call per follower!)
+    pipe = redis.pipeline()
+    for batch in chunks(followers, 100):
+        for follower_id in batch:
+            feed_key = f"feed:{follower_id}"
+            # ZADD: add post_id to sorted set with score=timestamp
+            # ZREMRANGEBYRANK: trim to keep only 500 most recent posts in cache
+            pipe.zadd(feed_key, {str(post_id): timestamp})
+            pipe.zremrangebyrank(feed_key, 0, -501)
+        pipe.execute()   # Batch execute → one network round-trip per 100 followers
+```
+
 ---
 
 ## 🚀 Step 5: The Complete Cache Architecture
@@ -304,7 +404,74 @@ Even with the Hybrid model, at *read time*, when Ronaldo posts, millions of user
 
 ---
 
-## 📋 Summary — Full Decision Table
+## 🔄 Step 6: Feed Retrieval — Pagination & Cursor-Based Loading
+
+### The Problem with Offset Pagination
+
+A naive implementation might use offset-based pagination:
+```sql
+-- Page 1
+SELECT post_id FROM feed_items WHERE user_id = bob ORDER BY post_id DESC LIMIT 20 OFFSET 0;
+-- Page 2
+SELECT post_id FROM feed_items WHERE user_id = bob ORDER BY post_id DESC LIMIT 20 OFFSET 20;
+```
+
+**Problems:**
+| Problem | Explanation |
+|---|---|
+| **Skip penalty** | `OFFSET 1000` scans and discards 1000 rows to reach the 1001st row. Expensive at large offsets. |
+| **Drift** | Between page 1 and page 2, new posts arrive. Page 2 may overlap with page 1 or skip posts. |
+
+### Cursor-Based Pagination ⭐ (The Production Solution)
+
+Use the `post_id` (Snowflake ID = time-ordered) as a cursor:
+
+```
+Initial load: GET /feed?limit=20
+→ Returns 20 post_ids, "next_cursor": "1847293"
+
+Next page: GET /feed?limit=20&before_cursor=1847293
+→ Redis: ZRANGEBYSCORE feed:bob -inf (1847293-1) LIMIT 20
+→ Returns the next 20 posts older than post 1847293
+
+No scan penalty! Redis sorted set ZRANGEBYSCORE = O(log N + results)
+No drift! "before_cursor" is a fixed point in time
+```
+
+---
+
+## 📊 Step 7: Feed Ranking (Beyond Chronological Order)
+
+So far we assumed chronological ordering. Real-world feeds (Facebook, Instagram) use **ranking algorithms** to promote more relevant posts.
+
+### Simple Ranking Score Formula
+
+```python
+def rank_score(post):
+    # Factors:
+    time_decay  = math.exp(-lambda_ * hours_since_posted)  # Older → lower score
+    engagement  = log(1 + post.likes + post.comments * 2)  # More liked → higher
+    affinity    = affinity_score[viewer][post.author]       # Close friends → higher
+    media_bonus = 1.5 if post.has_media else 1.0            # Photos/videos boosted
+    
+    return time_decay * engagement * affinity * media_bonus
+
+# Sort posts in the feed by rank_score descending
+ranked_feed = sorted(candidate_posts, key=rank_score, reverse=True)
+```
+
+**How to apply ranking to our cache system:**
+1. Fanout workers still push `post_id` + `timestamp` to feed caches.
+2. When assembling the feed for display, pull the top 100 candidate post IDs from the Feed Cache.
+3. Fetch full post data (engagement counts, media type) from Post Cache.
+4. Apply ranking formula to reorder those 100 candidates.
+5. Return top 20 to the user.
+
+> Note: The Feed Cache stores posts chronologically (sorted by time). The ranking re-sorts a small window of candidates at display time. This keeps the cache simple while still enabling ranking.
+
+---
+
+
 
 | Topic | Decision | Why |
 |---|---|---|

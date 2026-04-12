@@ -254,32 +254,42 @@ graph TB
 
 ## 🔬 Step 7: Data Gathering Service (The Write Path)
 
-We **cannot** update the Trie on every single search. At 100M searches/day, real-time trie updates would be catastrophic.
+We **cannot** update the Trie on every single search. At 100M searches/day, real-time trie updates would be catastrophic. The Data Gathering service processes petabytes of logs into a compact, optimized Trie.
 
-### The Pipeline:
+### 🧮 Trie Memory Estimation
+How big is the finalized Trie?
+- Let's assume a vocabulary of 10 million distinct search queries.
+- Average length = 20 chars.
+- 10M × 20 = 200 million nodes.
+- Each node stores: `char` (1 byte), `is_end` (1 byte), `children_pointers` (avg 3 pointers × 8 bytes = 24 bytes), `top5_cache` (5 strings × 20 bytes = 100 bytes).
+- Size per node ≈ 126 bytes.
+- Total size: 200M nodes × 126 bytes = **~25 GB**.
+This easily fits into the RAM of a modern single server! However, we shard it to distribute request load, not storage size.
+
+### The Pipeline (MapReduce):
 **Step 1 — Collect Raw Logs:**
 Every search query is written to a raw log file/stream (Kafka topic): 
 ```
 2026-04-12 08:00:01  user_123  query:"interview questions"
 2026-04-12 08:00:02  user_456  query:"internet explorer"
-2026-04-12 08:00:02  user_789  query:"interview questions"
 ```
 
-**Step 2 — Aggregate with Apache Spark (Weekly Batch):**
-Process logs for the past week and compute frequency per query:
-```
-"interview questions"     →  12,450,000 searches this week
-"internet explorer"       →   8,230,000 searches this week
-"interesting facts"       →   4,100,000 searches this week
+**Step 2 — Aggregate (MapReduce / Spark):**
+A weekly MapReduce job processes the logs:
+- **Map phase:** Emit `(query, 1)` for every log entry.
+- **Reduce phase:** Sum the counts to produce `(query, total_count)`.
+```json
+{"query": "interview questions", "count": 12450000}
+{"query": "internet explorer", "count": 8230000}
 ```
 
 **Step 3 — Build New Trie:**
-Using the frequency database, build a fresh Trie with all `top5_cache` pre-computed at every node.
+Using the Frequency DB, we compute the Trie offline. This computation involves a bottom-up pass after insertion to populate the `top5_cache` at every node, sorting the children's caches to find the local top 5. The output is a highly serialized binary file.
 
 **Step 4 — Blue/Green Deploy:**
-Replace the old Trie with the new one using a **blue-green swap** (two Trie servers, atomically switch traffic). Zero downtime.
+Replace the old Trie with the new one using a **blue-green swap** (two Trie servers, atomically switch traffic via Zookeeper). Zero downtime.
 
-> **Why weekly and not daily?** Typeahead suggestions don't need to be updated hourly. Users expect "interview questions" to appear — not the most viral topic from 10 minutes ago. Weekly batch is a reasonable tradeoff between freshness and complexity.
+> **Why weekly and not daily?** Typeahead suggestions don't need to be updated hourly. Users expect "interview questions" to appear — not the most viral topic from 10 minutes ago. Weekly batch is a reasonable tradeoff between freshness and compute cost.
 
 ---
 

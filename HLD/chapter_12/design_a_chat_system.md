@@ -49,7 +49,24 @@ Int:  "Yes — if Bob logs in from his laptop, he should see messages he receive
 - Message history persisted and synced across devices
 - 50 million DAU
 
+### 🧮 Back-of-the-Envelope Estimates
+
+| Metric | Calculation | Result |
+|---|---|---|
+| **Messages per day** | 50M DAU × avg 40 messages/user/day | **2 Billion messages/day** |
+| **Write QPS** | 2B / 86,400 sec | **~23,000 writes/sec** |
+| **Peak write QPS** | × 2 peak factor | **~46,000 writes/sec** |
+| **Message storage** | 2B × avg 100 bytes (text msg) | **~200 GB / day** |
+| **5-year storage** | 200 GB × 365 × 5 | **~365 TB** |
+| **Active WebSocket connections** | 50M DAU × 50% online at peak | **~25M simultaneous connections** |
+
+> **Takeaway 1:** 23,000 writes/sec is far too high for a single MySQL server (handles ~5,000 writes/sec). We must use a write-optimized storage engine (Cassandra/HBase).
+>
+> **Takeaway 2:** 25 million simultaneous WebSocket connections cannot be served by a single process (OS limit ~65K file descriptors per process). We need a fleet of stateful Chat Servers, each handling tens of thousands of persistent connections.
+
 ---
+
+
 
 ## 🏗️ Step 2: The Core Challenge — Polling vs. WebSocket
 
@@ -253,6 +270,47 @@ STEP 5: For each OFFLINE member → fire push notification.
 ```
 
 > **⚠️ Group Chat at Scale:** With 100 members per group, one group message triggers 100 Kafka publishes. At 50M DAU, this is manageable. But a system like Discord with 1M-member servers needs a more sophisticated fan-out strategy (similar to the News Feed Celebrity Problem in Chapter 11!).
+
+---
+
+## ✉️ Step 4B: Delivery Guarantees & Read Receipts
+
+"Real-time" isn't enough; users need to know the message arrived. Chat systems implement a **3-tick system**:
+1. Single tick `(✓)`: Reached the server.
+2. Double tick `(✓✓)`: Delivered to the recipient's device.
+3. Blue tick `(🔵)`: Read by the recipient.
+
+### The Full Delivery Sequence (with ACKs)
+
+```mermaid
+sequenceDiagram
+    participant Alice
+    participant CS1 as Server (Alice)
+    participant CS2 as Server (Bob)
+    participant Bob
+
+    Alice->>CS1: 1. Send: "Hello" (msg_id=A1)
+    CS1-->>Alice: 2. ACK (msg_id=A1) → shows ✓
+    
+    Note over CS1, CS2: Message routed via Kafka
+    CS1->>CS2: 3. Route: "Hello"
+    
+    CS2->>Bob: 4. Push: "Hello" (msg_id=A1)
+    Bob-->>CS2: 5. Delivery ACK (msg_id=A1)
+    
+    Note over CS2, CS1: Delivery ACK routed back
+    CS2->>CS1: 6. Route: Delivery ACK
+    CS1-->>Alice: 7. Push Delivery ACK → shows ✓✓
+    
+    Note over Bob: Bob opens the chat app
+    Bob->>CS2: 8. Read Receipt (msg_id=A1)
+    CS2->>CS1: 9. Route: Read Receipt
+    CS1-->>Alice: 10. Push Read Receipt → shows 🔵
+```
+
+**How do we handle packet loss?**
+If `Step 5 (Delivery ACK)` is lost due to a bad network, Alice's app will never show `✓✓`.
+To fix this, Alice's app implements a retry mechanism. If it doesn't receive `✓✓` within a timeout, it assumes failure. But to prevent Bob receiving the message twice, the Chat Server relies on the `message_id` as an **idempotency key**. If it sees `msg_id=A1` a second time, it drops the duplicate and just resends the ACK.
 
 ---
 
