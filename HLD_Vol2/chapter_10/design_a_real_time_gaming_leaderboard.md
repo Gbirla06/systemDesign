@@ -195,6 +195,208 @@ If a single Redis instance can't hold all players (unlikely for most games):
 
 ---
 
+## 🏗️ Step 6: API Design
+
+```
+GET    /v1/leaderboard/top?limit=100          → Get top 100 players
+GET    /v1/leaderboard/rank/{player_id}       → Get a player's global rank
+GET    /v1/leaderboard/around/{player_id}     → Get ±5 players around this player
+POST   /v1/scores                             → Update a player's score
+GET    /v1/leaderboard/friends/{player_id}    → Get rank among friends
+```
+
+### Response Example
+```json
+GET /v1/leaderboard/rank/alice
+
+{
+  "player_id": "alice",
+  "username": "AliceGamer99",
+  "score": 1900,
+  "rank": 54231,
+  "total_players": 25000000,
+  "percentile": "top 0.2%"
+}
+```
+
+---
+
+## 🔄 Step 7: Full Sequence Diagram (Score Update + Rank Query)
+
+```mermaid
+sequenceDiagram
+    participant GS as Game Server
+    participant API as Leaderboard API
+    participant Redis as Redis Sorted Set
+    participant MySQL as MySQL (Profiles)
+    participant Player as Player App
+
+    Note over GS: Match ends. Alice wins.
+    GS->>API: POST /scores {player: alice, score: 1900}
+    
+    API->>Redis: ZADD leaderboard 1900 "alice"
+    Redis-->>API: OK (O(log N) update)
+    
+    API->>MySQL: INSERT match_history (alice, score=1900, map=dust2, ...)
+    MySQL-->>API: OK
+    
+    API-->>GS: 200 OK {new_rank: 54231}
+    
+    Note over Player: Alice opens leaderboard tab
+    Player->>API: GET /leaderboard/rank/alice
+    API->>Redis: ZREVRANK leaderboard "alice"
+    Redis-->>API: 54230 (0-indexed)
+    API->>MySQL: SELECT username, avatar FROM players WHERE id = 'alice'
+    MySQL-->>API: {username: "AliceGamer99", avatar: "..."}
+    API-->>Player: {rank: 54231, score: 1900, username: "AliceGamer99"}
+    
+    Note over Player: Alice checks who's near her rank
+    Player->>API: GET /leaderboard/around/alice
+    API->>Redis: ZREVRANGE leaderboard 54226 54236 WITHSCORES
+    Redis-->>API: 11 players with scores
+    API-->>Player: [{rank: 54226, ...}, ..., {rank: 54236, ...}]
+```
+
+---
+
+## 💻 Step 8: Python Implementation of the Leaderboard Service
+
+### Core Service Logic
+```python
+import redis
+import uuid
+
+r = redis.Redis(host='localhost', port=6379)
+LEADERBOARD_KEY = "leaderboard:global"
+
+class LeaderboardService:
+    
+    def update_score(self, player_id: str, new_score: float):
+        """Update a player's score. O(log N)."""
+        # ZADD automatically creates or updates the member
+        r.zadd(LEADERBOARD_KEY, {player_id: new_score})
+    
+    def get_rank(self, player_id: str) -> int:
+        """Get 1-indexed rank (descending). O(log N)."""
+        zero_indexed_rank = r.zrevrank(LEADERBOARD_KEY, player_id)
+        if zero_indexed_rank is None:
+            raise ValueError(f"Player {player_id} not found")
+        return zero_indexed_rank + 1  # Convert to 1-indexed
+    
+    def get_top_k(self, k: int = 100) -> list:
+        """Get top K players with scores. O(log N + K)."""
+        # Returns [(member, score), ...]
+        return r.zrevrange(LEADERBOARD_KEY, 0, k - 1, withscores=True)
+    
+    def get_around_player(self, player_id: str, window: int = 5) -> list:
+        """Get players ±window around the given player."""
+        rank = r.zrevrank(LEADERBOARD_KEY, player_id)
+        if rank is None:
+            return []
+        start = max(0, rank - window)
+        end = rank + window
+        return r.zrevrange(LEADERBOARD_KEY, start, end, withscores=True)
+    
+    def get_score(self, player_id: str) -> float:
+        """Get a player's score. O(1)."""
+        return r.zscore(LEADERBOARD_KEY, player_id)
+    
+    def get_total_players(self) -> int:
+        """Get total number of players. O(1)."""
+        return r.zcard(LEADERBOARD_KEY)
+
+
+# Usage example:
+lb = LeaderboardService()
+lb.update_score("alice", 1900)
+lb.update_score("bob", 2300)
+print(f"Alice's rank: {lb.get_rank('alice')}")       # → 2
+print(f"Top 3: {lb.get_top_k(3)}")                   # → [('bob', 2300), ('alice', 1900), ...]
+```
+
+---
+
+## 🛡️ Step 9: Redis Persistence & Fault Tolerance
+
+### The Problem
+Redis is in-memory. If the Redis instance crashes, we lose the entire leaderboard. Rebuilding from MySQL would require re-inserting 25M players — which could take minutes.
+
+### Solution 1: Redis Persistence (RDB + AOF)
+| Mode | How it works | Recovery time |
+|---|---|---|
+| **RDB (Snapshot)** | Periodically save a full snapshot to disk (e.g., every 5 min) | Lose up to 5 min of data |
+| **AOF (Append-Only File)** | Log every write command to disk | Lose at most 1 second of data |
+| **RDB + AOF (Hybrid)** | Use both: AOF for recent writes, RDB for full backup | Best of both worlds |
+
+### Solution 2: Redis Replication
+Run a Redis replica that mirrors the primary in real-time:
+```
+Primary Redis (writes) → Replica Redis (reads + failover backup)
+```
+If the primary dies, promote the replica. Failover in ~10 seconds.
+
+### Solution 3: Rebuild from MySQL
+As a last resort, run a batch job:
+```sql
+SELECT player_id, score FROM players;
+-- Pipe results into Redis: ZADD leaderboard score player_id (× 25M times)
+-- Takes ~2-5 minutes with pipelining
+```
+
+---
+
+## 🎮 Step 10: Score Calculation Strategies
+
+Different games use very different scoring approaches:
+
+### Strategy 1: Cumulative Score (Default)
+Each match adds to the total: `new_score = old_score + match_points`.
+- Simple, but scores grow forever. Long-time players always dominate.
+
+### Strategy 2: Elo Rating (Chess-style)
+Score goes UP when you beat a higher-rated player, DOWN when you lose to a lower-rated one:
+```
+K = 32  # Sensitivity factor
+expected = 1 / (1 + 10^((opponent_rating - your_rating) / 400))
+new_rating = old_rating + K * (actual_result - expected)
+```
+- Self-balancing. New players can quickly rise to their true skill level.
+
+### Strategy 3: Decay (Seasonal)
+Scores lose 10% per week of inactivity. Forces players to keep playing:
+```
+score = base_score * (0.9 ^ weeks_inactive)
+```
+- Prevents "park and hold" where a player reaches #1 and stops playing.
+
+### Strategy 4: Percentile-Based
+Convert raw scores to percentile ranks: "You're in the top 5%!" rather than "You're rank 1,250,000."
+```python
+percentile = (1 - rank / total_players) * 100
+tier = "Diamond" if percentile >= 95 else "Gold" if percentile >= 75 else "Silver"
+```
+
+---
+
+## ❓ Interview Quick-Fire Questions
+
+**Q1: Why not use a SQL database for a leaderboard?**
+> SQL requires `SELECT COUNT(*) WHERE score > X` to compute rank — this scans the B-tree index linearly (O(N) in worst case). At 25M players and 1,160 QPS, this saturates the database CPU. Redis Sorted Sets use skip lists that compute rank in O(log N) during traversal by storing span metadata at each node.
+
+**Q2: How does a Redis Skip List compute rank without scanning all elements?**
+> Each node in the skip list's express lanes stores a "span" — the number of elements between itself and the next node at that level. To find rank, the algorithm traverses from the top lane downward, accumulating spans. Total traversal is O(log N) hops, and the accumulated span gives the exact rank.
+
+**Q3: How do you handle ties in scoring?**
+> Encode a tiebreaker in the fractional part of the score. For example, `score = actual_score + (1 - normalized_timestamp)`. The player who achieved the score earlier gets a slightly higher fractional component, thus ranking higher. Redis sorts by score first, then lexicographically by member name for true ties.
+
+**Q4: How do you reset weekly leaderboards efficiently?**
+> Create a new sorted set each week: `leaderboard:week:2026-W18`. At the start of the new week, the old key becomes read-only (for history/rewards), and a new empty key is used for the new week. Old keys can be archived or deleted after rewards are distributed.
+
+**Q5: What happens if Redis crashes? Do we lose the leaderboard?**
+> Three layers of protection: (1) Redis AOF persists every write command to disk (lose ≤1 second of data). (2) Redis replication maintains a real-time replica. (3) As a last resort, rebuild the entire leaderboard from MySQL player scores in ~2-5 minutes using Redis pipelining.
+
+---
+
 ## 📋 Summary — Quick Revision Table
 
 | Component | Choice | Why |
@@ -204,6 +406,7 @@ If a single Redis instance can't hold all players (unlikely for most games):
 | **Rank query** | **`ZREVRANK`** | Returns rank in O(log N) without scanning. |
 | **Top-K query** | **`ZREVRANGE 0 K`** | Returns top K players in O(log N + K). |
 | **Tie-breaking** | **Encode timestamp in decimal score** | Earlier achievement of same score ranks higher. |
+| **Persistence** | **AOF + Replication + MySQL fallback** | Triple protection against data loss. |
 
 ---
 
@@ -220,4 +423,4 @@ If a single Redis instance can't hold all players (unlikely for most games):
 ---
 
 > **📖 Previous Chapter:** [← Chapter 9: Design S3 Object Storage](/HLD_Vol2/chapter_9/design_s3_object_storage.md)  
-> **📖 Up Next:** Chapter 11 - Design a Payment System
+> **📖 Up Next:** [Chapter 11: Design a Payment System →](/HLD_Vol2/chapter_11/design_a_payment_system.md)

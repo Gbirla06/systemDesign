@@ -20,13 +20,17 @@ Int:  "Relatively rarely. A restaurant doesn't move. It's heavily read-intensive
 
 You:  "What is the scale?"
 Int:  "100 million Daily Active Users (DAU). 100,000 Search Queries Per Second (QPS) at peak."
+
+You:  "Do we need to consider map boundaries when scrolling?"
+Int:  "Yes, the app renders points on a map based on a bounding box."
 ```
 
 ### 📋 Finalized Scope
 - System is extremely **Read-Intensive** (Peak Search QPS is 100,000)
 - Barely **Write-Intensive** (Update QPS is ~5,000 max)
 - Low latency search results (<50ms)
-- Global distribution
+- Requires pagination and sorting by relevance/distance
+- Global distribution with regional hotspots (New York vs. Midwest)
 
 ---
 
@@ -43,7 +47,7 @@ Let's do the math to see what part of the system will actually break under load.
 | **Spatial Index Storage** | 200M instances × 24 bytes (ID + Geohash) | **~4.8 GB** |
 
 > **Crucial Takeaway:** Storage is NOT the problem. The entire business database (200 GB) and its index (~5 GB) could fit entirely in the RAM of a single modern server (e.g., an AWS r5.4xlarge has 128GB RAM). 
-> **The bottleneck is the CPU.** Processing 100,000 geometrical math queries per second will completely saturate a single server's CPU. We must design a highly distributable, low-CPU read architecture.
+> **The bottleneck is the CPU and Network.** Processing 100,000 geometrical math queries per second will completely saturate a single server's CPU. We must design a highly distributable, low-CPU read architecture.
 
 ---
 
@@ -54,8 +58,8 @@ Imagine we store businesses in PostgreSQL:
 CREATE TABLE business (
     id INT PRIMARY KEY,
     name VARCHAR(255),
-    latitude DECIMAL(9,6),
-    longitude DECIMAL(9,6)
+    latitude DECIMAL(10,7),
+    longitude DECIMAL(10,7)
 );
 
 CREATE INDEX idx_lat ON business(latitude);
@@ -73,7 +77,7 @@ WHERE latitude BETWEEN (user_lat - 1km) AND (user_lat + 1km)
 A standard B-Tree index is **1-Dimensional**. 
 - The DB hits `idx_lat` and successfully isolates a horizontal slice of the Earth that is 2km wide.
 - However, this horizontal slice wraps around the **entire globe**. It pulls back millions of records (New York, Madrid, Beijing, etc., if they share the same latitude slice).
-- It then has to manually loop through those millions of records to evaluate the `longitude` condition.
+- It then has to manually loop through those millions of records in memory to evaluate the `longitude` condition.
 - Using a composite index `(latitude, longitude)` doesn't help either. B-trees cannot range-query two columns simultaneously efficiently.
 
 > **To fix this, we must structurally map 2-Dimensional geographical space into a 1-Dimensional string that standard databases can query using simple prefix matching.**
@@ -82,7 +86,7 @@ A standard B-Tree index is **1-Dimensional**.
 
 ## 🗺️ Step 4: Masterclass in Spatial Indexing (Beginner to Advanced)
 
-The core of this interview chapter is Geospatial Indexing. You must be able to confidently explain **Geohash** and **Quadtree**.
+The core of this interview chapter is Geospatial Indexing. You must be able to confidently explain **Geohash** and **Quadtree**, and understand their trade-offs.
 
 ### 1️⃣ Geohash (The Industry Standard)
 
@@ -114,7 +118,7 @@ Geohash recursively divides the world into a grid of squares, generating a short
 
 #### **Advanced Concept: Prefix Matching & The Z-Curve**
 Because Geohashes are built by recursive subdivision, they trace a "Z-order curve" across the map.
-**The Magic Rule:** If two businesses share a long Geohash prefix, they are extremely close to each other geographically!
+**The Magic Rule:** If two businesses share a long Geohash prefix, they are close to each other geographically!
 
 ```sql
 -- Finding restaurants near a user in Geohash "9q8yyk" is practically instant!
@@ -123,7 +127,7 @@ SELECT * FROM geohash_index WHERE geohash LIKE '9q8yy%';
 ```
 
 #### **The Geohash Edge Case (The Boundary Problem)**
-Two places can be physically 5 meters away from each other, but if they fall on opposite sides of a Geohash boundary line (especially the Prime Meridian or Equator), their Geohash strings will look completely different! One might be `8...` and the other `9...`.
+Two places can be physically 5 meters away from each other, but if they fall on opposite sides of a Geohash boundary line (especially the Prime Meridian or Equator), their Geohash strings will look completely different! One might be `8u` and the other `9q`.
 
 > **The Advanced Solution:** Never just search the user's Geohash box! The algorithm must take the user's box and mathematically calculate the Geohashes of **the 8 surrounding neighbor boxes**. You query all 9 boxes and merge the results.
 
@@ -192,20 +196,25 @@ Now that we are using Geohash strings, our setup is remarkably simple. We split 
 **1. Spatial Index Table (The Fast Lookup Engine)**
 Stored in partitioned PostgreSQL or Redis.
 ```sql
-geohash_level_6 (PK)    -- e.g., '9q8yyk'
-business_id (PK)        
--- Composite Primary Key allows multiple businesses per geohash box.
+CREATE TABLE geohash_index (
+    geohash VARCHAR(6),     -- e.g., '9q8yyk' (Level 6)
+    business_id UUID,
+    PRIMARY KEY (geohash, business_id)
+);
 ```
 
 **2. Business Detail Table (The Source of Truth)**
 Stored in MySQL or Postgres with read replicas.
 ```sql
-business_id (PK)
-name
-address
-latitude
-longitude
-rating
+CREATE TABLE businesses (
+    business_id UUID PRIMARY KEY,
+    name VARCHAR(255),
+    address TEXT,
+    latitude DECIMAL(10, 7),
+    longitude DECIMAL(10, 7),
+    rating DECIMAL(2, 1),
+    photos JSONB
+);
 ```
 
 ### The Request Flow (Sequence Diagram)
@@ -214,31 +223,31 @@ rating
 sequenceDiagram
     participant User
     participant AppSvr as API Server
-    participant Cache as Redis Geohash Cache
-    participant DB as Postgres Business DB
+    participant Cache as Redis (Geohash Index)
+    participant DB as Postgres (Business Details)
 
     User->>AppSvr: GET /nearby?lat=40.7&lng=-74.0&radius=1km
     
-    Note over AppSvr: 1. Math: Convert User Lat/Lng to Level 6 Geohash ("dr5reg")
-    Note over AppSvr: 2. Math: Calculate the 8 neighboring Geohashes
+    Note over AppSvr: 1. Convert Lat/Lng to Level 6 Geohash ("dr5reg")
+    Note over AppSvr: 2. Calculate the 8 neighboring Geohashes
     
     AppSvr->>Cache: MGET "dr5reg", "dr5ref", "...", (all 9 boxes)
     Cache-->>AppSvr: Returns list of 150 Business IDs
     
-    AppSvr->>AppSvr: 3. Math: Filter out IDs that fall outside the exact 1km circle
+    Note over AppSvr: 3. Filter out IDs that fall outside the exact 1km circle using Great-circle distance math.
     
-    AppSvr->>DB: SELECT * FROM business WHERE id IN [filtered_ids]
+    AppSvr->>DB: SELECT * FROM businesses WHERE id IN [filtered_ids]
     DB-->>AppSvr: Returns business details (Name, Address)
     
-    AppSvr->>AppSvr: 4. Sort by rating, Paginate
+    Note over AppSvr: 4. Sort by rating/distance combo, limit to 20.
     
     AppSvr-->>User: JSON Response (Top 20 results)
 ```
 
 ### Why is this architecture resilient at 100k QPS?
-1. The complex geographical bounds checking is reduced to a standard Redis string lookup (`O(1)`). MGET pulls multiple keys concurrently.
+1. The complex geographical bounds checking is reduced to a standard Redis string lookup (`O(1)`). `MGET` pulls multiple keys concurrently.
 2. The Database is only queried for exact `ID` lookups (using the B-Tree Primary Key, which is an instantaneous `O(log N)` lookup).
-3. The heavy lifting is distributed. API servers handle math, Redis handles spatial lookups, DB handles metadata.
+3. The heavy lifting is distributed. API servers handle math geometry, Redis handles spatial lookups, DB handles metadata.
 
 ---
 
@@ -246,17 +255,36 @@ sequenceDiagram
 
 ### 1. Scaling the Reads (Hotspot Management)
 A single geographical node (e.g., all of Manhattan) might become exceptionally hot during Friday dinner searches, creating a "Hotspot" on the specific database shard that holds the Manhattan geohashes.
-- **Solution:** Master-Slave replication setup. The Master is used strictly for writes (adding new restaurants). We spin up 20+ Read-Replicas across the world. The Load balancer routes search queries geographically to the nearest Read-Replica.
+- **Solution:** Master-Replica architecture. The Master database handles writes (adding new restaurants). We spin up 20+ Read-Replicas across various Availability Zones. A Load Balancer routes read-heavy search queries geographically to the nearest Read-Replica.
 
-### 2. Updating a Business Location
-If a food truck moves, how do we update it?
-- We update the `latitude` and `longitude` in the Business DB on the Master node.
-- The Master fires off an asynchronous Kafka event: `"Business 123 moved to geohash dr5rtw"`.
-- A background worker consumes this event, deletes the old geohash mapping in Redis/Spatial Index, and inserts the new one. Because this is eventually consistent, a user might see the old food truck location for a few seconds. This is a perfectly acceptable trade-off for 100,000 QPS read performance.
+### 2. Updating a Business Location (Eventual Consistency)
+If a food truck moves, how do we update it without locking?
+- We update the `latitude` and `longitude` in the Master Business DB.
+- The Master fires off an asynchronous Kafka event/CDC stream (Change Data Capture): `"Business 123 moved to geohash dr5rtw"`.
+- A background worker consumes this event, deletes the old geohash mapping in the Redis Index, and inserts the new one. 
+- Because this is eventually consistent, a user might see the old food truck location for a few seconds. For a restaurant app, this is a perfectly acceptable trade-off for 100,000 QPS read performance.
 
 ### 3. Pagination and Ranking Algorithms
-Returning 500 restaurants in Times Square to a mobile phone wastes bandwidth. Furthermore, sorting by distance isn't always what users want.
-- **Solution:** The API server fetches all business IDs in the 9 geohash boxes. It joins this with a **Ranking Layer**. We can calculate a composite score formula: `(Rating * 0.4) + (Reviews * 0.3) - (Distance * 0.3)`. We then apply cursor-based pagination to return 20 places at a time.
+Returning 500 restaurants in Times Square to a mobile phone wastes bandwidth. Furthermore, sorting purely by distance isn't always what users want (a terrible 1-star restaurant next door shouldn't beat a 5-star restaurant 1 block away).
+- **Solution:** The API server fetches all business IDs in the 9 geohash boxes. It passes these IDs to a **Ranking Layer**. 
+- The Ranking Layer calculates a composite score formula: `(Rating * W1) + (Review_Count * W2) - (Distance * W3)`. 
+- We apply offset/limit pagination at the API level to return the top 20.
+
+---
+
+## ❓ Interview Quick-Fire Questions
+
+**Q1: Why can't we use a normal B-Tree index on (lat, lng) to find nearby places?**
+> B-Trees are one-dimensional. Using a composite index like `(lat, lng)` means the database first traverses the B-Tree for the latitude range, pulling all records globally within that latitude slice, and then performs a linear scan through those millions of records in memory to filter by longitude. This is O(N) over the horizontal slice and will destroy CPU under heavy load.
+
+**Q2: What is the "Boundary Problem" in Geohashes and how do you solve it?**
+> A Geohash grids the world. Two places can be 5 meters apart but fall on opposite sides of a grid boundary line, resulting in completely different Geohashes. We solve this by always taking the user's central Geohash box and mathematically deriving the 8 neighboring boxes. We query all 9 boxes and merge the results.
+
+**Q3: How do you filter out places that are inside the 9 boxes but outside the circular radius?**
+> The 9 boxes form a large square, but the search radius is a smaller circle inside it. After retrieving all business IDs from the 9 boxes, the application server computes the actual distance to each business using the Haversine formula (Great-circle distance) and discards any place whose distance > radius.
+
+**Q4: If Yelp has 100k QPS, why not put the entire Geohash index in application memory?**
+> You can (this is what Quadtrees do), but it makes the application servers stateful. Every time a new business is added or updated, you have to broadcast that update to all 1,000 application servers and synchronize their in-memory data structures. By extracting the Geohash index to a centralized high-speed cache like Redis, the API servers remain stateless and trivial to scale up and down horizontally.
 
 ---
 
@@ -264,26 +292,27 @@ Returning 500 restaurants in Times Square to a mobile phone wastes bandwidth. Fu
 
 | Component | Choice | Why |
 |---|---|---|
-| **Spatial Indexing Algorithm** | **Geohash (Base-32 String)** | Maps 2D maps to 1D strings. Allows `LIKE` prefix matching on B-Trees or Redis. Completely stateless! |
-| **Solving the Edge Problem** | **Query 8 neighboring boxes** | Geohash grids have arbitrary mathematical boundaries. Always query the immediate surroundings to prevent missing places. |
-| **Why not Quadtree?** | **Too much state to sync** | Quadtrees require maintaining and synchronizing a giant memory tree across hundreds of app servers. |
-| **Database Arch** | **Redis (Index) + SQL (Details)** | Redis provides near-instant lookup for `geohash -> [business_id]`. SQL provides durable storage for business info. Master-Slave handles read-heaviness. |
+| **Spatial Indexing Algorithm** | **Geohash (Base-32 String)** | Maps 2D maps to 1D strings. Allows standard `O(1)` lookups on Redis. Completely stateless for API servers! |
+| **Solving the Edge Problem** | **Query 8 neighboring boxes** | Geohash grids have arbitrary mathematical boundaries. Always query the 9-box grid. |
+| **Why not Quadtree?** | **Stateful scaling difficulty** | Quadtrees require maintaining and synchronizing a giant memory tree across hundreds of app servers. |
+| **Database Arch** | **Redis (Index) + SQL (Details)** | Redis provides near-instant lookup for `geohash -> [business_id]`. SQL provides durable storage for business info. Master-Replica handles read-heaviness. |
+| **Distance Math** | **Haversine Formula** | Filters out corner cases from the square Geohash boxes at the application server level. |
 
 ---
 
 ## 🧠 Memory Tricks for Interviews
 
 ### **The "Pizza Box" Analogy (Geohash vs Quadtree)**
-> **Geohash** is like buying pre-cut, perfectly uniform cardboard boxes. Every box is exactly the same size. Some boxes might be empty. But they are incredibly easy to stack and organize because you know exactly how big box #45 is.
+> **Geohash** is like buying pre-cut, perfectly uniform cardboard boxes. Every box is exactly the same size. Some boxes might be empty. But they are incredibly easy to stack and organize across databases because you know exactly how big box #45 is.
 >
-> **Quadtree** is like custom-folding a cardboard box tight around every individual slice of pizza. It saves a ton of cardboard (memory), but it takes way more effort to manage and fold (server CPU state).
+> **Quadtree** is like custom-folding cardboard tight around every individual slice of pizza. It saves a ton of cardboard (memory), but it takes way more effort to manage, fold, and share across servers (server CPU state).
 
 ### **"P.Z.S." — The Proximity Checklist**
 When an interviewer asks to search for things nearby, instantly remember **P.Z.S.**:
-1. **P**refix matching (Geohash turns complex numbers into simple strings).
-2. **Z**-curve bounds (Explaining the boundary case and the 9-box lookup).
+1. **P**refix matching (Geohash turns complex coordinate numbers into simple strings).
+2. **Z**-curve bounds (Explaining the boundary case and the mandatory 9-box lookup).
 3. **S**tateless (Why Geohash is easier to scale across machines than a Quadtree).
 
 ---
 
-> **📖 Up Next:** Chapter 2 - Design a Nearby Friends System (Dynamic moving targets!)
+> **📖 Up Next:** [Chapter 2 - Design a Nearby Friends System](/HLD_Vol2/chapter_2/design_nearby_friends.md) (Dynamic moving targets!)

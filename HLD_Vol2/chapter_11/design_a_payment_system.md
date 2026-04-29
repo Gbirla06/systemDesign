@@ -1,6 +1,6 @@
 # Volume 2 - Chapter 11: Design a Payment System (e.g., Stripe)
 
-> **Core Idea:** A payment system processes money transfers between buyers and sellers. Unlike most distributed systems where occasional errors are tolerable, payment systems have **zero tolerance for errors** — charging a customer twice, losing a payment, or paying a merchant the wrong amount can result in legal liability. The entire chapter revolves around one principle: **idempotency, idempotency, idempotency.** Every operation must be safely retryable without causing duplicate financial effects.
+> **Core Idea:** A payment system processes money transfers between buyers and sellers. Unlike most distributed systems (like social media or video streaming) where occasional errors or dropped messages are tolerable, payment systems have **zero tolerance for errors**. Charging a customer twice, losing a payment, or paying a merchant the wrong amount can result in massive legal liability and loss of trust. The entire chapter revolves around one core principle: **Idempotency.** Every single operation in the system must be safely retryable without causing duplicate financial effects.
 
 ---
 
@@ -9,17 +9,20 @@
 ### Clarifying the Requirements
 
 ```
-You:  "What type of payments? P2P (Venmo) or merchant (Stripe)?"
-Int:  "Merchant payments. Users buy products from sellers."
+You:  "What type of payments are we processing? P2P (Venmo) or merchant checkout (Stripe/Shopify)?"
+Int:  "Merchant payments. Users buy products from sellers on an e-commerce platform."
 
-You:  "What payment methods?"
-Int:  "Credit card, debit card, bank transfer."
+You:  "What payment methods do we support?"
+Int:  "Credit cards and debit cards only for now."
 
-You:  "Scale?"
+You:  "What is the scale?"
 Int:  "1 million transactions per day."
 
 You:  "Do we handle payouts to sellers?"
-Int:  "Yes. After purchase, money goes to our account, then we pay out to the seller."
+Int:  "Yes. After a successful purchase, money goes to our central escrow account. Later, we pay out to the seller minus our commission fee."
+
+You:  "Do we need multi-currency support?"
+Int:  "Yes, the system operates globally and must handle currency conversion."
 ```
 
 ### 📋 Back-of-the-Envelope
@@ -28,215 +31,254 @@ Int:  "Yes. After purchase, money goes to our account, then we pay out to the se
 |---|---|---|
 | **Transactions/day** | Given | **1 Million** |
 | **TPS** | 1M / 86400 | **~12 TPS (avg)** |
-| **Peak TPS** | 12 × 10 (flash sales) | **~120 TPS** |
-| **Transaction record size** | ~500 bytes | **500 bytes** |
-| **Storage/year** | 1M × 500 bytes × 365 | **~183 GB** |
+| **Peak TPS** | 12 × 10 (Black Friday / flash sales) | **~120 TPS** |
+| **Transaction record size** | ~500 bytes per transaction | **500 bytes** |
+| **Storage/year** | 1M × 500 bytes × 365 | **~183 GB / year** |
 
-> **Takeaway:** The scale is small. 120 TPS is trivial for any database. **The challenge is 100% about correctness, not performance.** Double-charging a customer or losing a payment is unacceptable.
+> **Crucial Takeaway:** The scale is incredibly small. 120 TPS and 183 GB/year is trivial for almost any modern database. **The challenge of this interview is 100% about CORRECTNESS, not performance.** A standard relational database is actually required here; NoSQL is the wrong choice because we need strict ACID transactions.
 
 ---
 
-## 💸 Step 2: The Payment Flow (Sequence Diagram)
+## 🏗️ Step 2: API & State Machine Design
+
+### The Payment State Machine
+A payment isn't just "Done" or "Failed". It goes through a strict lifecycle.
+
+```mermaid
+stateDiagram-v2
+    [*] --> PENDING : User clicks "Pay"
+    PENDING --> EXECUTING : Calling Stripe
+    EXECUTING --> SUCCESS : Stripe returns 200 OK
+    EXECUTING --> FAILED : Card declined
+    EXECUTING --> UNKNOWN : Network timeout
+    
+    UNKNOWN --> SUCCESS : Status verified via recon
+    UNKNOWN --> FAILED : Status verified via recon
+    
+    SUCCESS --> [*]
+    FAILED --> [*]
+```
+
+### The API Endpoints
+```
+POST /v1/payments                 → Initiate a charge
+GET  /v1/payments/{payment_id}    → Check status of a charge
+POST /v1/payouts                  → Bulk transfer money to sellers
+```
+
+**Payload for `/v1/payments`:**
+```json
+{
+  "buyer_id": "usr_9988",
+  "seller_id": "merch_123",
+  "amount": 150.00,
+  "currency": "USD",
+  "card_token": "tok_visa_abc123",
+  "idempotency_key": "uuid-abcd-8899"
+}
+```
+
+---
+
+## 💸 Step 3: The Payment Flow (Sequence Diagram)
+
+Let's walk through the "Happy Path" of a customer buying a $150 item.
 
 ```mermaid
 sequenceDiagram
     participant User
-    participant OrderSvc as Order Service
+    participant AppSvc as E-Commerce App
     participant PaySvc as Payment Service
-    participant PSP as Payment Service Provider<br/>(Stripe/PayPal)
+    participant PSP as PSP (Stripe)
+    participant DB as Payment DB
     participant Ledger as Ledger DB
-    participant Wallet as Seller Wallet
 
-    User->>OrderSvc: Checkout (order_id, amount)
-    OrderSvc->>PaySvc: Pay(order_id, amount, idempotency_key)
+    User->>AppSvc: Checkout ($150)
+    AppSvc->>PaySvc: ProcessPayment(amount, token, idempotency_key)
     
-    PaySvc->>PaySvc: Check idempotency_key → first time? proceed
-    PaySvc->>PSP: Charge(card_token, amount, idempotency_key)
-    PSP-->>PaySvc: {status: SUCCESS, psp_txn_id: "ch_abc123"}
+    PaySvc->>DB: INSERT INTO payments (status=PENDING, key)
     
-    PaySvc->>Ledger: Record double-entry (debit buyer, credit platform)
-    PaySvc->>Wallet: Update seller's pending balance
-    PaySvc-->>OrderSvc: Payment confirmed
-    OrderSvc-->>User: Order placed! ✅
+    PaySvc->>PSP: POST /v1/charges (amount, token, key)
+    PSP-->>PaySvc: 200 OK {status: SUCCESS, psp_id: "ch_xyz"}
+    
+    PaySvc->>DB: UPDATE payments SET status=SUCCESS
+    
+    PaySvc->>Ledger: Record Double-Entry Accounting
+    Ledger-->>PaySvc: OK
+    
+    PaySvc-->>AppSvc: Payment Confirmed
+    AppSvc-->>User: "Order Placed Successfully!" ✅
 ```
+
+*Note: PSP stands for "Payment Service Provider" (Stripe, PayPal, Braintree).*
 
 ---
 
-## 🔑 Step 3: Idempotency — The #1 Design Principle
+## 🔑 Step 4: Idempotency — The #1 Design Principle
 
-### The Problem
-Networks are unreliable. What if:
-1. Our server charges the card via Stripe successfully.
-2. Stripe returns "200 OK."
-3. Our server crashes BEFORE saving the result to our DB.
-4. The client retries the request.
-5. Without protection, we charge the card **again**.
+### The Distributed Systems Nightmare
+Networks are unreliable. Imagine this scenario:
+1. Our server calls Stripe to charge the card $150.
+2. Stripe processes the charge successfully.
+3. The network drops Stripe's "200 OK" response. Our server times out.
+4. Our server thinks the payment failed and retries the request.
+5. Without protection, Stripe charges the user's card **a second time**. The user is billed $300 instead of $150. Lawsuit incoming!
 
-### The Solution: Idempotency Key
-Every payment request includes a client-generated UUID (`idempotency_key`). The server ensures that the same key NEVER produces a second financial effect.
+### The Solution: Idempotency Keys
+An operation is "idempotent" if performing it multiple times yields the exact same result as performing it once. 
+Every payment request includes a client-generated UUID (`idempotency_key`).
 
-```python
-def process_payment(request):
-    key = request.idempotency_key
-    
-    # Step 1: Check if we've already processed this
-    existing = db.query("SELECT * FROM payments WHERE idempotency_key = ?", key)
-    if existing:
-        return existing.result  # Return cached response — no duplicate charge!
-    
-    # Step 2: First time → process the payment
-    result = stripe.charge(request.card_token, request.amount, idempotency_key=key)
-    
-    # Step 3: Save the result (even if it's a failure)
-    db.insert("INSERT INTO payments (idempotency_key, status, psp_txn_id, ...) VALUES (...)")
-    
-    return result
-```
-
-### The Database Guarantee
-A unique index on `idempotency_key` ensures that even if two identical requests arrive at the exact same millisecond, the database will reject the second INSERT with a duplicate key error.
+**The Triple Guarantee:**
+1. **The DB Guarantee:** We place a `UNIQUE INDEX` on `idempotency_key` in our database. If two identical requests hit our system at exactly the same microsecond, the DB rejects the second one.
+2. **The Code Guarantee:**
+   ```python
+   def process_payment(request):
+       # Fast check: Have we seen this key?
+       existing_payment = db.get_by_idempotency_key(request.key)
+       if existing_payment:
+           # If it's already successful, just return the cached success!
+           return existing_payment.response
+       
+       # ... process payment ...
+   ```
+3. **The PSP Guarantee:** We pass the `idempotency_key` to Stripe via an HTTP Header. Stripe stores these keys for 24 hours. If Stripe receives a duplicate key, they don't charge the card again; they simply echo back the exact same JSON response from the original successful charge.
 
 ---
 
-## 📒 Step 4: The Ledger — Double-Entry Bookkeeping
+## 📒 Step 5: The Ledger — Double-Entry Bookkeeping
 
-### Why a Ledger?
-Every financial system since 15th-century Italy uses **double-entry bookkeeping**: every transaction creates TWO entries — a **debit** from one account and a **credit** to another. The sum of all debits must always equal the sum of all credits. If they don't, money has been created or destroyed, which means there's a bug.
+We successfully charged the card. Now we must record who owns the money.
+Every financial system since 15th-century Italy uses **double-entry bookkeeping**: every transaction creates at least TWO entries — a **debit** from one account and a **credit** to another. 
 
-### The Ledger Table
+### The Invariant Rule
+> **The sum of all debits and credits for a single transaction MUST ALWAYS equal zero.**
+> If they don't, money has magically been created or destroyed, which means there's a bug.
+
+### The Ledger Table Schema
 ```sql
 CREATE TABLE ledger_entries (
     entry_id        UUID PRIMARY KEY,
-    transaction_id  UUID,          -- Groups the two sides together
-    account_id      VARCHAR(50),   -- "buyer:alice" or "platform:escrow"
+    transaction_id  UUID,          -- Groups all entries for one event together
+    account_id      VARCHAR(50),   -- E.g., 'buyer:alice', 'platform:escrow'
     amount          DECIMAL(19,4), -- Positive = credit, Negative = debit
     currency        VARCHAR(3),
     created_at      TIMESTAMP
 );
-
--- Example: Alice pays $100 for an order
--- Entry 1: Debit Alice          → -$100.00
--- Entry 2: Credit Platform      → +$100.00
--- SUM = $0 ✅ (money is conserved)
 ```
 
-### The Invariant
-```sql
-SELECT SUM(amount) FROM ledger_entries;
--- MUST always equal 0.00
--- If it doesn't, sound the alarm. Something is deeply wrong.
+### Example: Alice buys a $100 shirt from Bob
+When the charge succeeds, we record two rows in the ledger:
 ```
-
-This invariant is checked by a **reconciliation job** that runs hourly/daily.
+Transaction_ID: txn_999
+Entry 1: Debit  buyer:alice         -$100.00
+Entry 2: Credit platform:escrow     +$100.00
+[SUM = $0.00] ✅
+```
+Note: The money sits in the `platform:escrow` account. We don't credit Bob yet because the shirt hasn't shipped.
 
 ---
 
-## 🏛️ Step 5: System Architecture
+## 🏢 Step 6: Payouts & Complex Accounting
 
-```mermaid
-graph TD
-    subgraph Client
-        User["📱 User"]
-    end
+Three days later, the shirt is delivered. We must now pay Bob.
+However, our platform charges a **10% commission fee**.
 
-    subgraph Core
-        OrderSvc["🛒 Order Service"]
-        PaySvc["💳 Payment Service"]
-    end
+### Ledger Entries for Payout
+When the Payout Service runs, it moves the money out of escrow:
 
-    subgraph External
-        PSP["🏦 PSP\n(Stripe / PayPal)"]
-    end
-
-    subgraph Financial Storage
-        PayDB["💾 Payment DB\n(Transactions)"]
-        Ledger["📒 Ledger DB\n(Double-entry)"]
-        WalletDB["💰 Wallet DB\n(Seller balances)"]
-    end
-
-    subgraph Background
-        Recon["🔍 Reconciliation\nService"]
-        Payout["💸 Payout Service"]
-    end
-
-    User --> OrderSvc --> PaySvc
-    PaySvc --> PSP
-    PaySvc --> PayDB
-    PaySvc --> Ledger
-    PaySvc --> WalletDB
-    
-    Recon --> Ledger
-    Recon --> PSP
-    Payout --> WalletDB
-    Payout --> PSP
-
-    style PSP fill:#00b894,color:#fff
-    style Ledger fill:#e17055,color:#fff
-    style PaySvc fill:#0984e3,color:#fff
 ```
-
----
-
-## 🔄 Step 6: Handling Failures at Every Step
-
-### Failure Matrix
-| Failure Point | What Happens | How We Handle It |
-|---|---|---|
-| **Before PSP call** | Server crashes mid-processing | Idempotency key → safe to retry the entire request |
-| **PSP call timeout** | We don't know if the charge succeeded | Query PSP status API: `GET /charges/{idempotency_key}` |
-| **After PSP success, before DB write** | Payment charged but not recorded | Idempotency key + PSP reconciliation catches unrecorded charges |
-| **After DB write, before response** | Payment fully processed but client thinks it failed | Client retries → idempotency key returns cached success |
-
-### Reconciliation (The Safety Net)
-Every day, we download the complete transaction list from the PSP (Stripe) and compare it against our ledger:
-```
-Our Ledger says:     1,000 transactions today, total $50,000
-Stripe says:         1,001 transactions today, total $50,100
-
-MISMATCH! → 1 transaction ($100) was charged by Stripe but missing from our ledger.
-→ Alert on-call engineer. Investigate and fix.
-```
-
----
-
-## 💸 Step 7: Payouts to Sellers
-
-### The Flow
-1. Customer pays $100. Money goes to **Platform Escrow Account**.
-2. After order delivery confirmation, the **Payout Service** transfers money from escrow to the seller's bank account.
-3. Platform keeps a commission (e.g., 10% = $10).
-
-### Ledger entries for payout:
-```
-Debit  platform:escrow     -$90.00    (release to seller)
-Credit seller:merchant_42  +$90.00
-Debit  platform:escrow     -$10.00    (platform commission)
-Credit platform:revenue    +$10.00
+Transaction_ID: txn_1000
+Entry 1: Debit  platform:escrow       -$100.00   (Pull the money out of holding)
+Entry 2: Credit seller:bob            +$90.00    (Bob gets 90%)
+Entry 3: Credit platform:revenue      +$10.00    (We keep 10% profit)
+[SUM = $0.00] ✅
 ```
 
 ### Payout Batching
-Processing individual $5 payouts is expensive (each bank transfer has a fixed cost). Instead, batch payouts:
-- Accumulate seller earnings over 7 days.
-- On payout day, send one lump sum per seller.
-- Reduces bank transfer fees dramatically.
+Processing individual $90 bank transfers to Bob is expensive (banks charge a fixed fee per wire/ACH transfer). Instead, we batch them:
+- Accumulate Bob's sales over the month in the `seller:bob` ledger account.
+- On the 1st of the next month, we do a single $50,000 ACH transfer to Bob's real-world bank account.
 
 ---
 
-## 🧑‍💻 Step 8: Advanced Deep Dive
+## 🔄 Step 7: Handling Failures & Reconciliation
 
-### Exactly-Once with PSP
-We send `idempotency_key` to Stripe. Stripe guarantees: if they receive the same key twice, they charge the card only once and return the same response. This is the external guarantee. Our internal guarantee is the unique DB index on the key.
+What if the Payment Service crashes immediately after Stripe charges the card, but *before* we write to our Database or Ledger? 
 
-### Currency Handling
-- Store all monetary amounts as `DECIMAL(19,4)` — NEVER use floating point (0.1 + 0.2 ≠ 0.3 in IEEE 754).
-- Store currency code alongside every amount (e.g., `amount: 100.00, currency: "INR"`).
-- Never mix currencies in arithmetic without explicit conversion.
+Our database thinks the payment is `PENDING` (or we have no record of it), but Stripe actually took the user's money. This is an orphaned charge.
 
-### PCI DSS Compliance
-Our servers must NEVER store raw credit card numbers. Instead:
-1. The client sends the card number directly to the PSP (Stripe.js).
-2. PSP returns a `card_token` (e.g., `tok_abc123`).
-3. Our server only stores and uses the token. We never touch the actual card number.
+### The Solution: Daily Reconciliation
+Reconciliation is an automated accounting process that verifies two independent sets of records.
+1. Every night at 2:00 AM, our Reconciliation Service connects to Stripe via SFTP and downloads the official "Daily Settlement Report" (a massive CSV file of every charge Stripe processed yesterday).
+2. It queries our `Payment DB` for yesterday's records.
+3. It compares them row by row.
+
+```
+Our DB says:         10,000 transactions, total $500,000
+Stripe CSV says:     10,001 transactions, total $500,100
+
+MISMATCH DETECTED!
+Stripe charged $100 for txn_abc123, but our DB says it's PENDING.
+```
+
+When a mismatch is found:
+- The system automatically transitions `txn_abc123` to `SUCCESS` in our DB.
+- It retroactively writes the missing Ledger entries.
+- It triggers an alert to the finance engineering team if the mismatch cannot be auto-resolved.
+
+---
+
+## 🧑‍💻 Step 8: Advanced Scenarios (Staff Level)
+
+### 1. The Floating Point Trap
+**NEVER use `FLOAT` or `DOUBLE` for financial data.**
+In IEEE 754 floating-point architecture, `0.1 + 0.2 = 0.30000000000000004`. If you use floats, you will slowly leak fractions of pennies until your ledger fails the `SUM = 0` invariant.
+- **Solution A:** Use `DECIMAL(19,4)` in SQL.
+- **Solution B:** Store all currency as **Integers** representing the smallest unit (e.g., store $150.00 as `15000` cents). Stripe uses this architecture. 
+
+### 2. PCI DSS Compliance
+If you store raw credit card numbers (PANs) in your database, the government mandates extremely strict, expensive security audits (PCI DSS). 
+**Solution: Tokenization.**
+- The user types their credit card into an iframe hosted entirely by Stripe.
+- Stripe returns a temporary `tok_abc123` string to the browser.
+- The browser sends the token to our server. Our server NEVER sees the 16-digit card number. We are completely out of PCI scope.
+
+### 3. Distributed Transactions (Saga Pattern)
+Because we use microservices, updating the the E-Commerce DB, the Payment DB, and the Ledger DB cannot happen in a single SQL transaction.
+If the Payment DB updates, but the Ledger DB is down:
+- Do not use Two-Phase Commit (2PC) — it's too slow and locks rows across networks.
+- Use the **Saga Pattern**. If the Ledger DB fails, we publish a "Compensation Event" to Kafka that tells the Payment DB to refund the Stripe charge and revert to `FAILED`. Eventually consistent, but logically correct.
+
+### 4. Multi-Currency & FX (Foreign Exchange)
+If Alice (USA) buys a shirt from Bob (Europe) for €100:
+- Stripe charges Alice $110 USD (applying their daily exchange rate).
+- We must store BOTH currencies in the database.
+```json
+{
+  "charge_currency": "USD",
+  "charge_amount": 11000,
+  "settlement_currency": "EUR",
+  "settlement_amount": 10000,
+  "fx_rate": 1.10
+}
+```
+Never mix currencies in the Ledger. The Ledger invariant (`SUM=0`) only works if grouped by currency.
+
+---
+
+## ❓ Interview Quick-Fire Questions
+
+**Q1: Why rely on Stripe's idempotency instead of just our own database?**
+> Because network timeouts happen *after* the request leaves our server. If we call Stripe and the connection drops while waiting for the response, our database doesn't know if the charge succeeded or failed. If we retry blindly, Stripe might charge twice. Passing an idempotency key to Stripe ensures Stripe itself intercepts the retry and prevents the duplicate charge.
+
+**Q2: What is the difference between Authorization and Capture?**
+> "Auth" locks the funds on the user's credit card but does not move the money. "Capture" actually moves the money. In physical goods e-commerce, it is best practice to Auth the card at checkout, but only Capture the money when the box physically ships from the warehouse. If the item is out of stock, you simply void the Auth (which is free) rather than issuing a Refund (which costs processing fees).
+
+**Q3: How do you prevent a single user from clicking "Pay" 10 times quickly?**
+> The frontend disables the button after one click. But frontend rules can be bypassed. On the backend, we assign a unique idempotency key per *shopping cart checkout session*. If they spam the API, requests 2 through 10 hit the database, match the unique index on the idempotency key, and are safely rejected or return the cached response of the first click.
+
+**Q4: Why process Payouts as a batch?**
+> Moving money via ACH or Wire Transfer incurs fixed banking fees (e.g., $0.20 per ACH). If a merchant makes 1,000 sales of $1, wiring them money 1,000 times would cost $200 in bank fees — bankrupting the platform. By batching sales over a week and sending one $1,000 payout, we pay the $0.20 fee only once.
 
 ---
 
@@ -244,11 +286,12 @@ Our servers must NEVER store raw credit card numbers. Instead:
 
 | Component | Choice | Why |
 |---|---|---|
-| **Idempotency** | **Client UUID + unique DB index + PSP idempotency key** | Triple protection against duplicate charges. |
-| **Ledger** | **Double-entry bookkeeping** | Every debit has a matching credit. SUM must always = 0. |
-| **Reconciliation** | **Daily PSP ↔ Ledger comparison** | Catches any discrepancies between what PSP charged and what we recorded. |
-| **Payouts** | **Batched weekly transfers** | Reduces bank transfer fees. |
-| **Card security** | **PCI DSS tokenization** | Server never sees raw card numbers. PSP handles sensitive data. |
+| **Idempotency** | **UUID + Unique DB Index + PSP Header** | Triple protection against duplicate charges. Defeats network timeouts. |
+| **Ledger** | **Double-entry bookkeeping** | Every debit has a matching credit. SUM must always = 0. Ensures financial integrity. |
+| **Reconciliation** | **Daily automated batch jobs** | Downloads PSP CSVs, compares against internal DB to catch orphaned charges. |
+| **Security** | **PCI Tokenization** | Our backend never touches raw CC numbers. |
+| **Math** | **Integers (Cents) or DECIMAL** | Floating point math creates fraction-of-a-penny leaks. |
+| **Payouts** | **Batched asynchronous transfers** | Minimizes fixed bank transfer fees. |
 
 ---
 
@@ -257,12 +300,12 @@ Our servers must NEVER store raw credit card numbers. Instead:
 ### **"I.L.R." — The Payment Trinity**
 1. **I**dempotency — Every operation is safely retryable (UUID key).
 2. **L**edger — Double-entry bookkeeping (debit + credit = 0).
-3. **R**econciliation — Daily comparison with PSP to catch mismatches.
+3. **R**econciliation — Daily comparison with external PSP to catch mismatches.
 
 ### **"Never Trust the Network" Mantra**
-> Assume every network call can: (a) succeed silently, (b) fail silently, or (c) succeed but lose the response. Design every step to be recoverable from all three scenarios using idempotency keys.
+> Assume every network call to Stripe can: (a) succeed silently, (b) fail silently, or (c) succeed but lose the response. Design every step to be recoverable from all three scenarios using idempotency keys and state machines.
 
 ---
 
 > **📖 Previous Chapter:** [← Chapter 10: Design a Real-Time Gaming Leaderboard](/HLD_Vol2/chapter_10/design_a_real_time_gaming_leaderboard.md)  
-> **📖 Up Next:** Chapter 12 - Design a Digital Wallet
+> **📖 Up Next:** [Chapter 12: Design a Digital Wallet →](/HLD_Vol2/chapter_12/design_a_digital_wallet.md)

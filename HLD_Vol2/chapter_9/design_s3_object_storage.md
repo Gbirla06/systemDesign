@@ -20,50 +20,62 @@ Int:  "Store billions of objects. Hundreds of petabytes total. 100K reads/sec, 1
 
 You:  "What durability guarantee?"
 Int:  "Eleven nines (99.999999999%). Data must never be lost."
+
+You:  "Do we need to support sharing objects privately?"
+Int:  "Yes, presigned URLs for temporary access."
 ```
 
 ### 📋 Back-of-the-Envelope
 
 | Metric | Result |
 |---|---|
-| Total objects | ~10 Billion |
-| Total storage | ~100 PB |
-| Write QPS | 10,000 |
-| Read QPS | 100,000 |
-| Average object size | ~1 MB |
+| **Total objects** | ~10 Billion |
+| **Total storage** | ~100 PB |
+| **Write QPS** | 10,000 |
+| **Read QPS** | 100,000 |
+| **Average object size** | ~1 MB |
+| **Metadata storage** | 10 Billion × 200 bytes = ~2 TB |
+| **Ingress Bandwidth** | 10,000 QPS × 1 MB = ~10 GB/sec |
+| **Egress Bandwidth** | 100,000 QPS × 1 MB = ~100 GB/sec |
+
+> **Takeaway:** The metadata is surprisingly small (only 2 TB) and can easily fit in a standard distributed database. The data payload (100 PB) is massive and requires thousands of custom storage nodes. Network bandwidth is extreme, requiring massive load balancing.
 
 ---
 
-## 🏗️ Step 2: API Design
+## 🏗️ Step 2: API Design (RESTful)
 
 ```
 PUT    /bucket-name/object-key     → Upload object (body = raw bytes)
 GET    /bucket-name/object-key     → Download object
 DELETE /bucket-name/object-key     → Mark object as deleted
 HEAD   /bucket-name/object-key     → Get metadata (size, content-type, modified date)
-GET    /bucket-name?prefix=photos/ → List objects with prefix
+GET    /bucket-name?prefix=photos/ → List objects ending with a prefix
 ```
 
-Objects are addressed by `bucket + key`. There are no real directories — the `/` in `photos/vacation/img1.jpg` is just part of the key string. "Folder listing" is simulated by filtering keys by prefix.
+### The "Folder" Illusion
+Objects are addressed by `bucket + key`. There are no real directories. The `/` in `photos/vacation/img1.jpg` is just part of the string key.
+"Folder listing" is simulated by filtering keys by prefix. 
+
+When you call `GET /bucket-name?prefix=photos/&delimiter=/`, the API queries the metadata DB for keys starting with `photos/`, and groups anything after the next `/` into "CommonPrefixes" (which look like folders to the client).
 
 ---
 
-## 💾 Step 3: Architecture — Separating Metadata from Data
+## 💾 Step 3: Architecture — The Critical Split
 
-### The Critical Split
-Like email (Chapter 8), we separate two fundamentally different storage concerns:
+### Separating Metadata from Data
+Like standard distributed systems, we must separate two fundamentally different storage concerns:
 
 **1. Metadata Store:** "Where is object X? How big is it? Who owns it?"
-- Small records (~200 bytes per object)
-- Requires strong consistency (can't have two objects at the same key)
-- Must support fast lookups and prefix listing
-- **Technology:** Sharded MySQL or a distributed KV store
+- Small records (~200 bytes per object).
+- Requires strong consistency (can't have two objects at the exact same key).
+- Must support fast lookups, prefix listing, and pagination.
+- **Technology:** Sharded MySQL, TiDB, or CockroachDB.
 
 **2. Data Store:** The actual bytes of the object.
-- Large blobs (1 KB to 5 GB)
-- Write-once, read-many (immutable)
-- Must be extremely durable (11 nines)
-- **Technology:** Custom distributed storage nodes with erasure coding
+- Large blobs (1 KB to 5 GB).
+- Write-once, read-many (immutable).
+- Must be extremely durable (11 nines).
+- **Technology:** Custom distributed storage nodes with erasure coding.
 
 ```mermaid
 graph TD
@@ -95,6 +107,7 @@ CREATE TABLE objects (
     content_type VARCHAR(100),
     checksum    VARCHAR(64),      -- SHA-256 of object bytes
     created_at  TIMESTAMP,
+    deleted_at  TIMESTAMP,        -- Soft delete
     PRIMARY KEY (bucket_name, object_key)
 );
 
@@ -107,7 +120,9 @@ CREATE TABLE buckets (
 ```
 
 ### Sharding the Metadata
-With 10 billion objects, a single MySQL instance can't hold all metadata. Shard by `hash(bucket_name + object_key)`.
+With 10 billion objects, a single MySQL instance can't hold all metadata efficiently (indexes get too large).
+- **Partition Key:** `hash(bucket_name + object_key)`
+- This distributes the metadata evenly across 100+ database shards.
 
 ---
 
@@ -133,25 +148,31 @@ sequenceDiagram
     DN-->>Data: ACK (all chunks written)
     
     Data-->>API: Storage confirmed
-    API->>Meta: Commit metadata (object now "visible")
+    API->>Meta: Commit metadata (object now "visible" to GETs)
     API-->>Client: 200 OK
 ```
 
 ### Chunking Large Objects
 Objects larger than ~64 MB are split into fixed-size **chunks**. Each chunk is stored independently. The metadata tracks the ordered list of chunk IDs.
 ```
-photo.jpg (200 MB) → [chunk_1 (64MB), chunk_2 (64MB), chunk_3 (64MB), chunk_4 (8MB)]
+movie.mp4 (200 MB) → [chunk_1 (64MB), chunk_2 (64MB), chunk_3 (64MB), chunk_4 (8MB)]
 ```
 
-### Data Node Architecture
-Each data node manages a physical disk. Rather than creating millions of tiny files (one per object), data nodes use a **Log-Structured Storage** approach:
-- Objects are appended sequentially to large segment files (e.g., 1 GB each).
-- An in-memory index maps `object_id → (segment_file, byte_offset, length)`.
-- This eliminates the filesystem overhead of managing billions of individual files.
+### Data Node Architecture (Log-Structured Storage)
+Each Data Node manages a physical disk. Rather than creating millions of tiny files on the Linux filesystem (one per object), which would cause extreme inode exhaustion and fragmentation, data nodes use a **Log-Structured Storage** approach:
+
+1. The Data Node maintains a large contiguous file called a **Segment File** (e.g., 1 GB in size).
+2. Incoming chunks are appended sequentially to the end of the current open Segment File.
+3. An in-memory Hash Map (or RocksDB) maps `chunk_id → (segment_file_id, byte_offset, length)`.
+4. When a Segment File reaches 1 GB, it is marked Read-Only, and a new one is opened.
+
+> **Why this matters:** Sequential appends physically spin the HDD plate continuously, achieving 150+ MB/s write speeds, whereas random small file writes degrade to ~1 MB/s due to disk head seeking.
 
 ---
 
 ## 🛡️ Step 6: Durability — Achieving 11 Nines
+
+If we lose data, the business dies. How do we ensure "Eleven Nines" (99.999999999%) of durability?
 
 ### Approach 1: Simple Replication (3 copies)
 Store 3 copies of every object on 3 different servers in 3 different racks.
@@ -167,48 +188,78 @@ Imagine you have a 4-digit number: `1234`. Instead of storing 3 copies (`1234`, 
 2. Compute 2 parity pieces: `P1 = 1+2 = 3`, `P2 = 3+4 = 7`
 3. Store all 6 pieces on 6 different servers: `[1, 2, 3, 4, P1=3, P2=7]`
 
-If ANY 2 servers die, you can reconstruct the original `1234` from the remaining 4 pieces using the parity math. (Real erasure coding uses Galois Field arithmetic, not simple addition.)
+If ANY 2 servers die, you can reconstruct the original `1234` from the remaining 4 pieces using the parity math.
 
-#### The Math (8+4 Scheme)
+#### The Real Math (8+4 Scheme)
 S3 uses an **8+4 erasure coding scheme**:
-- Split each object into 8 data chunks.
-- Compute 4 parity chunks (using Reed-Solomon).
-- Store all 12 chunks on 12 different servers.
-- **Can tolerate ANY 4 simultaneous server failures** without data loss.
-- **Storage overhead:** 12/8 = 1.5x (vs 3x for replication). Saves 50% storage!
+- Split each 64MB chunk into 8 data pieces (8MB each).
+- Compute 4 parity pieces (8MB each).
+- Store all 12 pieces on 12 different servers across 3 different Availability Zones (Datacenters).
+- **Can tolerate ANY 4 simultaneous server failures** without data loss. We could literally lose an entire datacenter (4 servers) and still serve the file.
+- **Storage overhead:** 12/8 = **1.5x** (vs 3x for replication). Saves 50% storage costs!
 
-**Durability math:** Probability of losing 5+ out of 12 servers simultaneously ≈ `10^-12` → **12 nines! Exceeds our 11-nine target.**
+**Durability math:** Probability of losing 5 out of 12 servers simultaneously across AZs ≈ `10^-12` → **12 nines! Exceeds our 11-nine target.**
 
 ---
 
 ## 🗑️ Step 7: Deletion and Garbage Collection
 
 ### The Problem
-Objects are immutable and may be replicated/erasure-coded across many nodes. "Deleting" an object instantly from all locations is complex and risky (partial deletes = data corruption).
+Objects are immutable and erasure-coded across 12 nodes. "Deleting" an object instantly from 12 locations over the network is complex and risky (what if 3 nodes are temporarily down? We get partial deletes).
 
-### The Solution: Lazy Deletion
-1. **Mark as deleted:** Set a `deleted_at` timestamp in the metadata DB. Object becomes invisible to clients immediately.
-2. **Garbage Collector (Background):** A periodic background job scans for objects marked as deleted and physically removes the chunks from data nodes.
-3. **Compaction:** After chunks are removed, segment files have "holes." A compaction process rewrites segment files to reclaim space.
+### The Solution: Lazy Deletion + Compaction
+1. **Soft Delete:** A user calls `DELETE /photo.jpg`. We instantly set `deleted_at = NOW()` in the Metadata DB. The object becomes invisible to clients immediately.
+2. **Garbage Collector (Background):** A background script scans the Metadata DB for deleted objects. It tells the 12 Data Nodes: "You can delete chunk XYZ."
+3. **Compaction:** The Data Node marks the chunk as deleted in its local RocksDB index. However, the data is still sitting inside the 1GB Segment File. 
+4. Once a Segment File is >50% deleted data, a Compaction Thread reads the remaining valid chunks, writes them to a NEW Segment File, updates the local index, and physically deletes the old Segment File. (Similar to JVM Garbage Collection).
 
 ---
 
-## 🧑‍💻 Step 8: Advanced Deep Dive
+## 🧑‍💻 Step 8: Advanced Scenarios (Staff Level)
 
-### Consistency: Read-After-Write
-After a successful PUT, a subsequent GET must return the newly written object (not a stale "404 Not Found"). This requires the metadata commit to be synchronous — the PUT only returns 200 after metadata is durably written.
+### 1. Multipart Uploads
+We said objects can be 5 GB. If a user tries to upload 5 GB in a single PUT request and their Wi-Fi drops at 99%, they have to restart the entire upload.
 
-### Multi-Region Replication
-For disaster recovery, objects can be replicated to a different geographic region. This is async — the primary region acknowledges the write immediately, and a background process copies chunks to the secondary region. RPO (Recovery Point Objective) is typically a few minutes.
+**Solution:**
+- The client breaks the 5 GB file into 100 parts of 50 MB.
+- The client calls `POST /upload?uploads` to initiate. Gets an `upload_id`.
+- The client uploads parts in parallel: `PUT /upload?partNumber=1&uploadId=123`.
+- Once all parts are uploaded, client calls `POST /upload?uploadId=123` to Complete.
+- The Server stitches them together in the metadata (just pointing to the ordered chunks). No data movement happens on the backend.
 
-### Versioning
-S3 supports object versioning. Each PUT to the same key creates a new version:
-```
-my-bucket/config.json → v1 (original)
-my-bucket/config.json → v2 (updated)
-my-bucket/config.json → v3 (latest)
-```
-Old versions are retained until explicitly deleted. Implemented by storing `version_id` alongside the object key in the metadata table.
+### 2. Presigned URLs
+How do you safely let a user download a private file without giving them AWS credentials?
+- The backend generates a signature using its secret key: `HMAC_SHA256(SecretKey, "GET /photo.jpg expires=1700000000")`.
+- It appends this to the URL: `https://s3.com/photo.jpg?expires=1700...&sig=abcd123`
+- The API Gateway mathematically verifies the signature. If valid and not expired, it serves the file. No database lookup required for authentication!
+
+### 3. Consistency: Read-After-Write
+S3 provides **strong consistency** for Read-After-Write. This means if you PUT a file and get a 200 OK, a GET request 1 millisecond later MUST return the new file.
+- This is achieved because the Metadata DB is the arbiter of truth. 
+- The Metadata DB is only updated AFTER all 12 data nodes acknowledge the write. 
+- Therefore, the file is not visible to GETs until it is completely durable.
+
+### 4. Multi-Region Replication
+For disaster recovery, objects can be replicated to a different geographic continent. This is **asynchronous** — the primary region acknowledges the write immediately, and a background process copies chunks to the secondary region over the WAN.
+
+---
+
+## ❓ Interview Quick-Fire Questions
+
+**Q1: Why not just use a POSIX File System (like ext4) instead of object storage?**
+> File systems use hierarchical directories and inodes. When you reach 10 Billion files, the inode table grows too large for memory, resulting in massive disk thrashing just to look up a file path. File systems are not distributed by nature. Object storage flattens the hierarchy and separates the metadata (MySQL) from the raw bytes (Data nodes).
+
+**Q2: What is the main advantage of Erasure Coding over Replication?**
+> Cost savings. To achieve high durability with replication, you need 3 copies (3x overhead). With an 8+4 Erasure Coding scheme, you only need 1.5x overhead space while surviving 4 simultaneous hardware failures. When storing 100 Petabytes, saving 1.5x storage is worth tens of millions of dollars.
+
+**Q3: Why use Log-Structured Storage for the Data Nodes?**
+> If a Data Node saves 10 million 1KB images as individual files, the OS will run out of file descriptors and inodes. Furthermore, writing random small files to HDD disks is extremely slow due to disk head seek time. Log-structured storage appends all objects sequentially into massive 1GB segment files, maximizing write throughput.
+
+**Q4: How do you handle hot partitions in the Metadata DB?**
+> If many users upload files to a bucket named "logs" concurrently, the shard holding the "logs" prefix will overheat. We fix this by prefixing object keys with a hash. Instead of `logs/2026/04...`, we store it as `hash(filename)-logs/2026/04...`. This distributes the keys randomly across all shards.
+
+**Q5: How does the system verify data hasn't suffered from "bit rot" on disk?**
+> When the object is uploaded, the API Gateway calculates the SHA-256 checksum and saves it in the Metadata DB. When serving a GET request, the Data Node recalculates the checksum of the chunks. If they don't match, bit rot occurred. The system fetches the parity chunks from other servers to repair the corrupted chunk on the fly.
 
 ---
 
@@ -216,10 +267,11 @@ Old versions are retained until explicitly deleted. Implemented by storing `vers
 
 | Component | Choice | Why |
 |---|---|---|
-| **Metadata** | **Sharded MySQL** | Strong consistency for key→location mapping. Supports prefix listing. |
-| **Data storage** | **Log-structured append on data nodes** | Avoids filesystem overhead of billions of small files. |
+| **Metadata** | **Sharded Database (MySQL/TiDB)** | Strong consistency for key→location mapping. Supports prefix listing. |
+| **Data storage** | **Log-structured append on Data Nodes** | Avoids filesystem inode exhaustion. Maximizes sequential disk write speed. |
 | **Durability** | **Erasure coding (8+4)** | 12 nines durability at only 1.5x storage overhead (vs 3x for replication). |
-| **Deletion** | **Lazy delete + background GC** | Avoids complex distributed delete. Metadata marked instantly, chunks cleaned up later. |
+| **Deletion** | **Lazy delete + background GC** | Avoids complex distributed deletes. Metadata marked instantly, chunks cleaned up later during compaction. |
+| **Large Files** | **Multipart Uploads** | Parallel uploads, resumable upon network failure. |
 
 ---
 
@@ -236,4 +288,4 @@ Old versions are retained until explicitly deleted. Implemented by storing `vers
 ---
 
 > **📖 Previous Chapter:** [← Chapter 8: Design a Distributed Email Service](/HLD_Vol2/chapter_8/design_a_distributed_email_service.md)  
-> **📖 Up Next:** Chapter 10 - Design a Real-Time Gaming Leaderboard
+> **📖 Up Next:** [Chapter 10 - Design a Real-Time Gaming Leaderboard →](/HLD_Vol2/chapter_10/design_a_real_time_gaming_leaderboard.md)
