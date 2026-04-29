@@ -80,6 +80,24 @@ Covers large-scale distributed system design based on **Alex Xu's System Design 
 | 14 | [Design YouTube](/HLD/chapter_14/design_youtube.md) | ✅ Done |
 | 15 | [Design Google Drive](/HLD/chapter_15/design_google_drive.md) | ✅ Done |
 
+### Chapters Roadmap (Vol. 2):
+
+| # | Chapter | Status |
+|---|---|---|
+| 1 | [Design a Proximity Service](/HLD_Vol2/chapter_1/design_a_proximity_service.md) | ✅ Done |
+| 2 | [Design Nearby Friends](/HLD_Vol2/chapter_2/design_nearby_friends.md) | ✅ Done |
+| 3 | [Design Google Maps](/HLD_Vol2/chapter_3/design_google_maps.md) | ✅ Done |
+| 4 | [Design a Distributed Message Queue](/HLD_Vol2/chapter_4/design_a_distributed_message_queue.md) | ✅ Done |
+| 5 | [Design a Metrics Monitoring System](/HLD_Vol2/chapter_5/design_a_metrics_monitoring_system.md) | ✅ Done |
+| 6 | [Design Ad Click Event Aggregation](/HLD_Vol2/chapter_6/design_ad_click_event_aggregation.md) | ✅ Done |
+| 7 | [Design a Hotel Reservation System](/HLD_Vol2/chapter_7/design_a_hotel_reservation_system.md) | ✅ Done |
+| 8 | [Design a Distributed Email Service](/HLD_Vol2/chapter_8/design_a_distributed_email_service.md) | ✅ Done |
+| 9 | [Design S3-like Object Storage](/HLD_Vol2/chapter_9/design_s3_object_storage.md) | ✅ Done |
+| 10 | [Design a Real-Time Gaming Leaderboard](/HLD_Vol2/chapter_10/design_a_real_time_gaming_leaderboard.md) | ✅ Done |
+| 11 | [Design a Payment System](/HLD_Vol2/chapter_11/design_a_payment_system.md) | ✅ Done |
+| 12 | [Design a Digital Wallet](/HLD_Vol2/chapter_12/design_a_digital_wallet.md) | ✅ Done |
+| 13 | [Design a Stock Exchange](/HLD_Vol2/chapter_13/design_a_stock_exchange.md) | ✅ Done |
+
 ---
 
 ## 🧩 LLD — Low-Level Design
