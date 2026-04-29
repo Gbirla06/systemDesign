@@ -106,6 +106,12 @@ Geohash recursively divides the world into a grid of squares, generating a short
 - `9q8` (Precision Level 3) → Smaller region (e.g., California)
 - `9q8yyk` (Precision Level 6) → Exact city block (approx 1.2km × 600m)
 
+| Geohash Length | Grid Size (approx) | Use Case |
+|---|---|---|
+| 4 | 39km x 19km | Wide city search |
+| 5 | 4.9km x 4.9km | Neighborhood search |
+| 6 | 1.2km x 600m | Proximity walking distance |
+
 #### **Advanced Concept: Prefix Matching & The Z-Curve**
 Because Geohashes are built by recursive subdivision, they trace a "Z-order curve" across the map.
 **The Magic Rule:** If two businesses share a long Geohash prefix, they are extremely close to each other geographically!
@@ -119,7 +125,7 @@ SELECT * FROM geohash_index WHERE geohash LIKE '9q8yy%';
 #### **The Geohash Edge Case (The Boundary Problem)**
 Two places can be physically 5 meters away from each other, but if they fall on opposite sides of a Geohash boundary line (especially the Prime Meridian or Equator), their Geohash strings will look completely different! One might be `8...` and the other `9...`.
 
-> **The Advanced Solution:** Never just search the user's Geohash box! The user might be standing on the very edge of their box. The algorithm must take the user's box and mathematically calculate the Geohashes of **the 8 surrounding neighbor boxes**. You query all 9 boxes and merge the results.
+> **The Advanced Solution:** Never just search the user's Geohash box! The algorithm must take the user's box and mathematically calculate the Geohashes of **the 8 surrounding neighbor boxes**. You query all 9 boxes and merge the results.
 
 ---
 
@@ -133,35 +139,58 @@ A Geohash grid statically divides the world into equal-sized boxes, even if that
 3. Break the root node into 4 kids (NW, NE, SW, SE). Distribute businesses into them.
 4. Recursively repeat this for any child node that still has > 100 businesses.
 
+#### **Quadtree Node Code Implementation:**
+```python
+class QuadTreeNode:
+    def __init__(self, bounding_box):
+        self.bounding_box = bounding_box # Defines lat/lng borders
+        self.businesses = []             # List of business IDs inside
+        self.children = []               # NW, NE, SW, SE child nodes
+        self.is_leaf = True              # Only leaves hold data
+        
+    def insert(self, business):
+        if not self.bounding_box.contains(business.location):
+            return False
+            
+        if self.is_leaf:
+            self.businesses.append(business)
+            if len(self.businesses) > 100:
+                self.subdivide()  # Splits into 4 children, pushes data down
+        else:
+            for child in self.children:
+                if child.insert(business):
+                    break
+```
+
 **The Result in your RAM:**
-- Central Park in NYC will be an incredibly deep part of the tree with thousands of tiny boxes (because a small physical area contains thousands of hotdog stands).
-- The Sahara Desert will literally just be a single gigantic box at level 1 of the tree (because there are no businesses there).
-- It perfectly maps density.
+- Central Park in NYC will be an incredibly deep part of the tree with thousands of tiny boxes.
+- The Sahara Desert will literally just be a single gigantic box at level 1 of the tree.
 
 #### **Advanced Concept: The Scaling Nightmare of Quadtrees**
 If Quadtrees are so efficient for memory, why don't we always use them? 
 Because Quadtrees are **Stateful**.
-- You must build and hold the tree in the RAM of the server. 
-- If you have 100,000 QPS, you need dozens of API servers. Which means every single API server must independently hold its own copy of the massive Quadtree in its RAM.
-- If a new business opens, how do you update 50 different Quadtrees across 50 different servers simultaneously without race conditions?
+- You must build and hold the tree in the RAM of the server (e.g., 5GB of memory). 
+- If you have 100,000 QPS, you need dozens of API servers. This means every single API server must independently hold its own copy of the massive Quadtree in its RAM.
+- If a new business opens, how do you update 50 different Quadtrees across 50 different servers simultaneously without race conditions? You need Zookeeper to lead replication.
 - **Conclusion:** Quadtrees are powerful, but incredibly complex to scale linearly due to state sync issues.
 
-### 3️⃣ Google S2 (The Staff Engineer Flex)
-If interviewing for Senior/Staff, mention **Google S2 Geometry**. It maps a sphere to a 1D index using a **Hilbert Curve** rather than a Z-Curve (which Geohash uses). Hilbert curves preserve spatial locality much better than Z-curves, virtually eliminating the "boundary problem" of Geohash. S2 is used by Google Maps, Tinder, and Uber.
+---
 
-> **Final Decision for our Design:** We choose **Geohash**. Why? Because it maps exactly to strings, enabling us to use standard, boring, Highly-Available databases (like Redis/Cassandra) instead of building custom in-memory tree management servers.
+### 3️⃣ Google S2 (The Staff Engineer Flex)
+If interviewing for Senior/Staff, mention **Google S2 Geometry**. It maps a 3D sphere to a 1D index using a **Hilbert Curve** rather than a Z-Curve (which Geohash uses). Hilbert curves lack the sudden massive jumps associated with Z-curves, preserving spatial locality much better and virtually eliminating the "boundary problem" of Geohashes. S2 is natively used by Google Maps, Tinder, and Uber.
+
+> **Final Decision for our Design:** We choose **Geohash**. Why? Because it maps exactly to strings, enabling us to use standard, boring, Highly-Available databases (like Redis/Cassandra) rather than building complex stateful in-memory custom trees.
 
 ---
 
 ## 🏛️ Step 5: Database and Caching Architecture
 
-Now that we are using Geohash strings, our data model is simple.
+Now that we are using Geohash strings, our setup is remarkably simple. We split read-heavy spatial indexing from write-heavy descriptive data.
 
 ### The Schema
-We split read-heavy spatial data from write-heavy descriptive data.
 
 **1. Spatial Index Table (The Fast Lookup Engine)**
-Stored in Redis or Cassandra for immense concurrent read scale.
+Stored in partitioned PostgreSQL or Redis.
 ```sql
 geohash_level_6 (PK)    -- e.g., '9q8yyk'
 business_id (PK)        
@@ -169,7 +198,7 @@ business_id (PK)
 ```
 
 **2. Business Detail Table (The Source of Truth)**
-Stored in MySQL or Postgres.
+Stored in MySQL or Postgres with read replicas.
 ```sql
 business_id (PK)
 name
@@ -201,21 +230,23 @@ sequenceDiagram
     AppSvr->>DB: SELECT * FROM business WHERE id IN [filtered_ids]
     DB-->>AppSvr: Returns business details (Name, Address)
     
-    AppSvr-->>User: JSON Response (Top 50 results)
+    AppSvr->>AppSvr: 4. Sort by rating, Paginate
+    
+    AppSvr-->>User: JSON Response (Top 20 results)
 ```
 
-### Why is this so fast?
-1. The complex geographical bounds checking is reduced to a standard Redis string lookup (`O(1)`).
-2. The Database is only queried for exact `ID` lookups (using the B-Tree Primary Key, which is instantaneous `O(log N)`).
-3. The heavy lifting is distributed.
+### Why is this architecture resilient at 100k QPS?
+1. The complex geographical bounds checking is reduced to a standard Redis string lookup (`O(1)`). MGET pulls multiple keys concurrently.
+2. The Database is only queried for exact `ID` lookups (using the B-Tree Primary Key, which is an instantaneous `O(log N)` lookup).
+3. The heavy lifting is distributed. API servers handle math, Redis handles spatial lookups, DB handles metadata.
 
 ---
 
 ## 🚀 Step 6: Advanced Scenarios & Edge Cases
 
-### 1. Scaling the Reads (100,000 QPS)
-A single geographical node (e.g., all of Manhattan) might become exceptionally hot during Friday dinner searches, creating a "Hotspot".
-- **Solution:** We use a Master-Slave replication setup. The Master is used strictly for writes (adding new restaurants). We spin up 20+ Read-Replicas across the world. The Load balancer routes search queries geographically to the nearest Read-Replica.
+### 1. Scaling the Reads (Hotspot Management)
+A single geographical node (e.g., all of Manhattan) might become exceptionally hot during Friday dinner searches, creating a "Hotspot" on the specific database shard that holds the Manhattan geohashes.
+- **Solution:** Master-Slave replication setup. The Master is used strictly for writes (adding new restaurants). We spin up 20+ Read-Replicas across the world. The Load balancer routes search queries geographically to the nearest Read-Replica.
 
 ### 2. Updating a Business Location
 If a food truck moves, how do we update it?
@@ -223,9 +254,9 @@ If a food truck moves, how do we update it?
 - The Master fires off an asynchronous Kafka event: `"Business 123 moved to geohash dr5rtw"`.
 - A background worker consumes this event, deletes the old geohash mapping in Redis/Spatial Index, and inserts the new one. Because this is eventually consistent, a user might see the old food truck location for a few seconds. This is a perfectly acceptable trade-off for 100,000 QPS read performance.
 
-### 3. Pagination and Ranking
-Returning 500 restaurants in Times Square to a mobile phone crashes the app.
-- **Solution:** The API server fetches all business IDs in the 9 geohash boxes. It joins this with a **Ranking Layer** (e.g., sorting by rating, distance, and ad tracking). It then paginates the response, returning only 20 results at a time using cursor-based pagination.
+### 3. Pagination and Ranking Algorithms
+Returning 500 restaurants in Times Square to a mobile phone wastes bandwidth. Furthermore, sorting by distance isn't always what users want.
+- **Solution:** The API server fetches all business IDs in the 9 geohash boxes. It joins this with a **Ranking Layer**. We can calculate a composite score formula: `(Rating * 0.4) + (Reviews * 0.3) - (Distance * 0.3)`. We then apply cursor-based pagination to return 20 places at a time.
 
 ---
 
@@ -255,4 +286,4 @@ When an interviewer asks to search for things nearby, instantly remember **P.Z.S
 
 ---
 
-> **📖 Up Next:** Chapter 2 - Design Nearby Friends System (Dynamic moving targets!)
+> **📖 Up Next:** Chapter 2 - Design a Nearby Friends System (Dynamic moving targets!)
